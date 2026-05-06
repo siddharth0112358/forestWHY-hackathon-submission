@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# uv
+.python-version
+
+# environment
+.env
+.env.local
+
+# data + artefacts
+db_images/
+predictions.db
+predictions.db-*
+evals/
+samples/
+*.pt
+*.gguf
+*.safetensors
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# streamlit
+.streamlit/secrets.toml
