@@ -234,6 +234,105 @@ Numbers will be filled in by `scripts/evaluate.py` on the held-out split.
   push accuracy further, at the cost of needing to retrain the encoder
   on each iteration.
 
+## Who this serves and what they pay today
+
+forestWHY's structured output (`change_class`, `severity`, `area_pct`,
+`driver_hypothesis`, plus the prose rationale) maps onto four concrete
+buyers who are already spending real money on the alternatives.
+
+### 1. EU Deforestation Regulation (EUDR) compliance teams
+
+**Who.** Importers and traders of seven commodities into the EU — soy,
+palm oil, cattle/beef, cocoa, coffee, rubber, wood — must prove every
+shipment originates from plots that have not been deforested since
+**31 December 2020**. Enforcement starts **30 December 2025** for large
+operators, six months later for SMEs. Non-compliance fines: up to **4 % of
+EU turnover**.
+
+**What they pay today.**
+- Satelligence, Descartes Labs, LiveEO, Forest IQ subscriptions:
+  **€0.50–2.00 per hectare per year** for plot-level monitoring.
+- Manual ground audits where satellite is inconclusive: **€5–50/ha/year**.
+- Internal compliance staff: 1–3 FTE per major importer.
+
+**What we deliver.** Structured per-plot reports with a date-stamped
+`change_class`, `area_pct`, and `driver_hypothesis` aligned to the EUDR's
+"deforestation" and "forest degradation" definitions. The prose rationale
+is what a compliance officer pastes into a due-diligence statement; that
+field is the one a generic change-detection API can't produce. Pricing
+goal: ≤ €0.20/ha/year by running on-orbit inference instead of round-trip
+to a cloud GPU.
+
+### 2. Voluntary carbon-credit verification (REDD+ / ARR / IFM projects)
+
+**Who.** Validation/Verification Bodies (VVBs) under Verra (VCS), Gold
+Standard, Plan Vivo, ART/TREES. Project developers (Wildlife Works,
+Pachama, Sylvera, Renoster) running REDD+ at landscape scale.
+
+**What they pay today.**
+- Project verification cycle (every 5 years for VCS): **$30 K–$200 K per
+  project**, dominated by VVB site visits and stratified ground sampling.
+- Buffer-pool reversals + integrity scandals (Pachama, ZEE Verra
+  re-baseline) cost the industry an estimated **$1–2 B in mark-downs**
+  during 2023–2024.
+- High-frequency monitoring services (Pachama Forecast, Sylvera REDD
+  Watch): **$10–50 K per project per year** on top of verification.
+
+**What we deliver.** Continuous tile-level change classification with the
+specific driver fields VVBs need to distinguish leakage from reversal
+from intentional clearing. The 10-step reasoning chain produces an audit
+trail for each alert — the missing artefact in current automated
+monitoring stacks. Specific replacement target: VVBs running quinquennial
+on-site checks because they don't trust automated mid-period attribution.
+
+### 3. National forest agencies in tropical countries
+
+**Who.** Ibama / INPE (Brazil), KLHK + Sipongi (Indonesia), DGEF (DRC),
+Ministerio del Ambiente (Peru), Forest Department (Cambodia).
+
+**What they pay today.**
+- Internal alert systems: PRODES + DETER (Brazil), MoEF SIPONGI
+  (Indonesia), GFW alerts globally. Annual budgets in **$10s of millions
+  per agency**.
+- Limitation: existing alerts say *where* deforestation happened with low
+  latency but rarely classify *why* (mining vs. plantation vs. fire vs.
+  agricultural clearing). Driver attribution is done downstream by hand.
+
+**What we deliver.** Driver-attributed alerts that go directly into
+prosecutorial workflows. A Brazilian prosecutor (MPF) building a case
+against an illegal cattle operation needs `driver_hypothesis="agricultural_clearing"`
++ `cropa_roads` evidence + a written rationale, not just a polygon. That's
+the brief our 10-step output already meets.
+
+### 4. Agricultural lenders, banks, insurers
+
+**Who.** IDB Invest, Rabobank, ICAEW Sustainable Finance Institute
+members, Lloyd's syndicates writing tropical land insurance.
+
+**What they pay today.**
+- Subscription due-diligence services for land collateral: **$3–10/ha/year**.
+- Reputational risk: HSBC, JBS, Cargill have each paid 8-figure penalties
+  / divestments over deforestation-linked exposures since 2020.
+
+**What we deliver.** Continuous proof of forest stock for collateral
+underwriting + structured event records when something changes. The
+auditability of the prose rationale is the differentiator — a credit
+committee can read why a flag was raised, not just receive a Boolean.
+
+### Honest sizing
+
+This is not a $100 B TAM pitch. The realistic addressable spend across
+the four segments above is **$1.5–4 B/year** by 2027 (mostly EUDR-driven).
+forestWHY is one component of a future product — specifically, the
+*reasoning layer* on top of an alert pipeline. It does not replace
+GFW/PRODES, it sits between them and the human reader.
+
+The defensible product wedge is **driver-attributed, audit-ready alerts
+priced 5–10× below incumbents because inference runs on commodity
+hardware instead of a managed cloud GPU stack**. Whether that's a
+self-serve API, an embeddable widget for the GFW UI, or a white-label
+service for VVBs is a packaging question, not a tech question.
+
 ## Related work
 
 - I-JEPA — *Self-Supervised Learning from Images with a Joint-Embedding

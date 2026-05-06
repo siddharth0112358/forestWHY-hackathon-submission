@@ -74,4 +74,4 @@ if panel_dir:
         for j, name in enumerate(PANEL_ORDER[i:i + cols_per_row]):
             path = full_dir / f"{name}.png"
             if path.exists():
-                row_cols[j].image(str(path), caption=f"{i + j + 1}. {name}", use_column_width=True)
+                row_cols[j].image(str(path), caption=f"{i + j + 1}. {name}", width="stretch")

@@ -212,7 +212,7 @@ else:
             if not full.exists():
                 row_cols[j].caption(f"{name}: missing")
                 continue
-            row_cols[j].image(str(full), caption=f"{i + j + 1}. {name}", use_column_width=True)
+            row_cols[j].image(str(full), caption=f"{i + j + 1}. {name}", width="stretch")
 
 with st.expander("Raw VLM JSON"):
     raw = row.get("raw_response")

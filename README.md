@@ -6,13 +6,35 @@
 > trained on
 > [`Siddharth63/forestwhy-training-v1`](https://huggingface.co/datasets/Siddharth63/forestwhy-training-v1).
 
-forestWHY runs deforestation analysis aboard a simulated satellite. For each
-5 km tile it sees, the system fetches a temporal pair of Sentinel-2 13-band
-acquisitions (≈ 1 year apart), runs both through an **I-JEPA ViT-L/8** encoder
-to produce six differential attention/embedding panels, pairs those with
-eight spectral panels (RGB, NIR-FC, SWIR, ΔNDVI, ΔNBR), and asks
-**LFM2.5-forestWHY** — a 2 B fine-tune of LFM2-VL — to classify the change.
-Only the resulting JSON is downlinked. No raw imagery leaves orbit.
+forestWHY does what a single-frame remote-sensing model can't: it **reasons
+over a temporal pair** of Sentinel-2 acquisitions and tells you not only
+that something changed, but *what kind of change*, *what's driving it*, and
+*why a human should believe the answer*.
+
+The pipeline takes a before/after pair (≈ 1 year apart, 13 bands, 5 km
+tile) and turns it into 14 input panels for a vision-language model:
+
+- **8 spectral panels** — RGB, NIR-FC, SWIR before/after plus ΔNDVI and
+  ΔNBR — answer *"how big is the pixel-level signal?"*
+- **6 JEPA panels** — multi-scale attention, embedding cosine distance,
+  cross-patch correlation, attention-role delta, head disagreement, PCA
+  cluster split — answer *"did the scene's semantic class actually flip,
+  or are we just looking at cloud shadow / phenology / haze?"*
+
+Spectral alone is fooled by all the things spectral indices have always
+been fooled by. JEPA differentials alone tell you *something* changed but
+not *what*. Together — fed to **LFM2.5-forestWHY**, a 2 B fine-tune of
+LFM2-VL trained on 150 K labelled Sentinel-2 pairs — the model can read
+both kinds of evidence in one pass and produce a structured deforestation
+report with a 10-step reasoning chain. That report is small enough (≈ 1 KB)
+to ship as JSON, opening the door to on-orbit inference where the raw
+imagery would never be downlinked.
+
+This is a workflow that neither satellite imagery alone (no temporal
+reasoning, no driver attribution) nor a generic VLM alone (can't read
+spectral or JEPA panels) can produce. See [ARCHITECTURE.md](ARCHITECTURE.md)
+for the design rationale and [ARCHITECTURE.md#who-this-serves-and-what-they-pay-today](ARCHITECTURE.md#who-this-serves-and-what-they-pay-today)
+for the customer/product story.
 
 ## Documentation
 
