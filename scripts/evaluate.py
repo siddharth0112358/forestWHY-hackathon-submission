@@ -1,17 +1,37 @@
 #!/usr/bin/env python3
-"""Per-field accuracy + JSON schema validation: base LFM2.5-VL vs forestWHY.
+"""Per-field accuracy: base LFM2.5-VL-1.6B vs Siddharth63/LFM2.5-forestWHY.
 
-Reads a held-out test split from `Siddharth63/forestwhy-training-v1`,
-runs both the base and fine-tuned models, computes per-field accuracy
-plus area_pct MAE and confidence Brier score, and emits:
+Reads a balanced 50/50 (deforestation / no-deforestation) subsample from
+`Siddharth63/forestwhy-training-v2` and runs both models on the same panels.
+Reports change-class accuracy, binary deforestation accuracy, area_pct MAE,
+and severity accuracy. Writes:
 
     evals/<timestamp>/
-        report.md         human-readable summary
+        report.md         human-readable summary table
         results.json      per-sample records (used by app/eval_compare.py)
-        meta.json         backend, model ids, args
+        meta.json         args + dataset/model identifiers
+
+Note: the LFM2.5-forestWHY fine-tune was trained on a *private* curated set
+`Siddharth63/forestwhy-combined-v1` (mix of v1 + curated driver examples).
+We evaluate against `forestwhy-training-v2`, an out-of-distribution public
+test set, to give an honest estimate of generalisation.
 
 Usage:
-    uv run python scripts/evaluate.py --backend vllm --max-samples 50
+    # Both models behind the same backend (e.g. one CUDA host with vLLM):
+    uv run python scripts/evaluate.py \\
+        --backend vllm --base-url https://<host>/v1 \\
+        --max-samples 300
+
+    # Mixed: fine-tune via local llama-server, base via remote vLLM:
+    uv run python scripts/evaluate.py \\
+        --finetuned-backend llamacpp --finetuned-base-url http://localhost:8080/v1 \\
+        --base-backend vllm        --base-base-url https://<host>/v1 \\
+        --max-samples 300
+
+    # Fine-tune only (skip base comparison):
+    uv run python scripts/evaluate.py \\
+        --finetuned-backend llamacpp --finetuned-base-url http://localhost:8080/v1 \\
+        --skip-base --max-samples 50
 """
 
 from __future__ import annotations
@@ -20,10 +40,11 @@ import argparse
 import io
 import json
 import logging
+import random
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from dotenv import load_dotenv
 from PIL import Image
@@ -31,44 +52,53 @@ from PIL import Image
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from forestwhy.evaluator import make_backend  # noqa: E402
+from forestwhy.evaluator import make_backend, model_name  # noqa: E402
 from forestwhy.prompts import JSON_SCHEMA, PANEL_ORDER  # noqa: E402
 
 EVAL_ROOT = REPO_ROOT / "evals"
 log = logging.getLogger("forestwhy.evaluate")
 
 
-def _load_test_split(repo: str, split: str, n: int):
-    """Load up to `n` samples from the HF dataset."""
-    from datasets import load_dataset
-    ds = load_dataset(repo, split=split, streaming=True)
-    out: list[dict] = []
-    for row in ds:
-        out.append(row)
-        if len(out) >= n:
-            break
-    return out
+# ─────────────────────────────────────────────────────────────────────────────
+# v2 dataset adapters
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Map our canonical PANEL_ORDER (used at training time + by predict.py) to the
+# image column names in `Siddharth63/forestwhy-training-v2`.
+V2_IMAGE_KEYS: dict[str, str] = {
+    "rgb_before":         "img_rgb_before",
+    "rgb_after":          "img_rgb_after",
+    "nir_fc_before":      "img_nir_false_color_before",
+    "nir_fc_after":       "img_nir_false_color_after",
+    "swir_before":        "img_swir_composite_before",
+    "swir_after":         "img_swir_composite_after",
+    "delta_ndvi":         "img_delta_ndvi",
+    "delta_nbr":          "img_delta_nbr",
+    "attention_multi":    "img_attention_multi",
+    "embedding_change":   "img_embedding_change",
+    "cropa_roads":        "img_cropa_roads",
+    "delta_attn_role":    "img_delta_attn_role",
+    "head_disagreement":  "img_head_disagreement",
+    "pca_semantic":       "img_pca_semantic",
+}
+
+DEFORESTATION_CLASS = "deforestation"
 
 
 def _row_to_panels(row: dict) -> list[bytes]:
-    """Convert one HF dataset row's images into 14 PNG byte-strings.
-
-    The forestwhy-training-v1 dataset stores panels under keys matching
-    PANEL_ORDER. Falls back to grey placeholders for any missing.
-    """
+    """Convert a v2 row's images into 14 PNG byte-strings in PANEL_ORDER."""
     pngs: list[bytes] = []
     for name in PANEL_ORDER:
-        img = row.get(name)
+        col = V2_IMAGE_KEYS.get(name, name)
+        img = row.get(col)
         if img is None:
-            placeholder = Image.new("RGB", (128, 128), (64, 64, 64))
             buf = io.BytesIO()
-            placeholder.save(buf, format="PNG")
+            Image.new("RGB", (128, 128), (64, 64, 64)).save(buf, format="PNG")
             pngs.append(buf.getvalue())
             continue
         if isinstance(img, dict) and "bytes" in img:
             pngs.append(img["bytes"])
             continue
-        # PIL.Image.Image
         buf = io.BytesIO()
         if hasattr(img, "save"):
             img.save(buf, format="PNG")
@@ -82,166 +112,295 @@ def _row_metadata(row: dict) -> dict:
     return {
         "lon": row.get("lon", 0.0),
         "lat": row.get("lat", 0.0),
-        "size_km": row.get("size_km", 5.0),
-        "region_id": row.get("region_id", "unknown"),
-        "biome": row.get("biome", "unknown"),
-        "country": row.get("country", "unknown"),
-        "before_timestamp": row.get("before_timestamp", "unknown"),
-        "after_timestamp": row.get("after_timestamp", "unknown"),
-        "before_cloud_cover": row.get("before_cloud_cover"),
-        "after_cloud_cover": row.get("after_cloud_cover"),
+        "size_km": 5.0,
+        "region_id": row.get("region", "unknown"),
+        "biome": "tropical",
+        "country": row.get("region", "unknown"),
+        "before_timestamp": f"{row.get('year_before', 'unknown')}-07-15T00:00:00Z",
+        "after_timestamp":  f"{row.get('year_after',  'unknown')}-07-15T00:00:00Z",
+        "before_cloud_cover": None,
+        "after_cloud_cover": None,
     }
 
 
 def _row_truth(row: dict) -> dict:
-    """Pull the ground-truth labels into a JSON_SCHEMA-shaped dict."""
     return {
-        "change_class":      row.get("change_class"),
-        "severity":          row.get("severity"),
-        "area_pct":          row.get("area_pct"),
-        "driver_hypothesis": row.get("driver_hypothesis"),
-        "confidence":        row.get("confidence", 1.0),
-        "reasoning":         row.get("reasoning", ""),
-        "cloud_cover_note":  row.get("cloud_cover_note", ""),
+        "change_class":      row.get("label"),
+        "severity":          row.get("change_magnitude"),
+        "area_pct":          row.get("affected_area_percent"),
+        "driver_hypothesis": _coerce_driver(row),
+        "deforestation":     row.get("label") == DEFORESTATION_CLASS,
+        "reasoning":         row.get("assistant_text", ""),
     }
 
 
-def _accuracy(pred: list[Any], truth: list[Any]) -> float:
-    if not pred:
+def _coerce_driver(row: dict) -> str:
+    """Try to extract a coarse driver from v2's free-text fields."""
+    text = " ".join(filter(None, [
+        row.get("step8_driver_synthesis"),
+        row.get("causal_mechanism"),
+        row.get("alternative_drivers"),
+    ])).lower()
+    for k in (
+        "agricultural_clearing", "agriculture", "soy", "cattle", "ranch", "pasture",
+        "logging", "selective", "timber",
+        "mining", "gold", "ore",
+        "fire", "burn", "wildfire",
+        "flood", "river",
+        "plantation", "palm", "rubber",
+        "natural_regrowth", "regrowth", "secondary",
+        "road", "infrastructure",
+    ):
+        if k in text:
+            for canonical, keys in {
+                "agricultural_clearing": ["agricultural_clearing", "agriculture", "soy", "cattle", "ranch", "pasture"],
+                "logging_road":          ["logging", "selective", "timber", "road"],
+                "mining":                ["mining", "gold", "ore"],
+                "fire":                  ["fire", "burn", "wildfire"],
+                "flood":                 ["flood", "river"],
+                "plantation":            ["plantation", "palm", "rubber"],
+                "natural_regrowth":      ["natural_regrowth", "regrowth", "secondary"],
+            }.items():
+                if k in keys:
+                    return canonical
+    return "unknown"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Balanced sampling
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _balanced_sample(repo: str, split: str, n_per_class: int, seed: int = 42) -> list[dict]:
+    """Pull n_per_class rows for `deforestation` and n_per_class rows for the
+    rest (combined into a single 'no_deforestation' bucket). Streams the dataset
+    so we don't materialise 150k rows."""
+    from datasets import load_dataset
+    ds = load_dataset(repo, split=split, streaming=True).shuffle(seed=seed, buffer_size=10_000)
+    deforestation: list[dict] = []
+    other: list[dict] = []
+    target = n_per_class
+    for row in ds:
+        label = row.get("label")
+        if label == DEFORESTATION_CLASS and len(deforestation) < target:
+            deforestation.append(row)
+        elif label is not None and label != DEFORESTATION_CLASS and len(other) < target:
+            other.append(row)
+        if len(deforestation) >= target and len(other) >= target:
+            break
+    rng = random.Random(seed)
+    out = deforestation + other
+    rng.shuffle(out)
+    log.info("Sampled %d deforestation + %d other = %d total", len(deforestation), len(other), len(out))
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Metrics
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _accuracy(pred: Iterable, truth: Iterable) -> float:
+    pairs = [(p, t) for p, t in zip(pred, truth) if p is not None and t is not None]
+    if not pairs:
         return 0.0
-    return sum(1 for p, t in zip(pred, truth) if p == t) / len(pred)
+    return sum(1 for p, t in pairs if p == t) / len(pairs)
 
 
-def _mae(pred: list[float | None], truth: list[float | None]) -> float | None:
+def _mae(pred: Iterable, truth: Iterable) -> float | None:
     pairs = [(p, t) for p, t in zip(pred, truth) if p is not None and t is not None]
     if not pairs:
         return None
-    return sum(abs(p - t) for p, t in pairs) / len(pairs)
+    return sum(abs(float(p) - float(t)) for p, t in pairs) / len(pairs)
 
 
-def _brier(prob: list[float | None], hit: list[bool]) -> float | None:
-    pairs = [(p, h) for p, h in zip(prob, hit) if p is not None]
-    if not pairs:
+def _binary_deforestation_pred(pred: dict) -> bool | None:
+    cc = pred.get("change_class")
+    if cc is None:
         return None
-    return sum((p - (1.0 if h else 0.0)) ** 2 for p, h in pairs) / len(pairs)
+    return cc == DEFORESTATION_CLASS
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     load_dotenv(REPO_ROOT / ".env")
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-7s  %(message)s",
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s  %(levelname)-7s  %(message)s",
                         datefmt="%H:%M:%S")
     p = argparse.ArgumentParser()
-    p.add_argument("--backend", required=True, choices=["vllm", "llamacpp", "transformers"])
-    p.add_argument("--base-model", default="LiquidAI/LFM2-VL-450M")
+    p.add_argument("--dataset", default="Siddharth63/forestwhy-training-v2")
+    p.add_argument("--split", default="train",
+                   help="v2 has only a `train` split; we subsample.")
+    p.add_argument("--max-samples", type=int, default=300,
+                   help="Total samples (split 50/50 between deforestation and not).")
+    p.add_argument("--seed", type=int, default=42)
+
+    p.add_argument("--base-model", default="LiquidAI/LFM2.5-VL-1.6B")
     p.add_argument("--finetuned-model", default="Siddharth63/LFM2.5-forestWHY")
+
+    # One backend covers both unless overridden:
+    p.add_argument("--backend", default=None,
+                   choices=["vllm", "llamacpp", "transformers"],
+                   help="Default backend for both base and fine-tuned (override per-side below).")
+    p.add_argument("--base-url", default=None)
+
+    p.add_argument("--base-backend", default=None,
+                   choices=["vllm", "llamacpp", "transformers"])
     p.add_argument("--base-base-url", default=None)
+    p.add_argument("--finetuned-backend", default=None,
+                   choices=["vllm", "llamacpp", "transformers"])
     p.add_argument("--finetuned-base-url", default=None)
-    p.add_argument("--dataset", default="Siddharth63/forestwhy-training-v1")
-    p.add_argument("--split", default="test")
-    p.add_argument("--max-samples", type=int, default=50)
+
+    p.add_argument("--skip-base", action="store_true",
+                   help="Skip the base-model side (fine-tune-only eval).")
     args = p.parse_args()
 
-    log.info("Loading %d samples from %s [%s] ...", args.max_samples, args.dataset, args.split)
-    samples = _load_test_split(args.dataset, args.split, args.max_samples)
+    if args.max_samples < 2 or args.max_samples % 2 != 0:
+        log.warning("--max-samples should be even and ≥ 2; rounding up.")
+        args.max_samples = max(2, args.max_samples + (args.max_samples % 2))
+    n_per_class = args.max_samples // 2
+
+    # ------------------- sample -----------------------------------------------
+    log.info("Loading %d balanced samples (50/50 deforestation/other) from %s [%s] ...",
+             args.max_samples, args.dataset, args.split)
+    samples = _balanced_sample(args.dataset, args.split, n_per_class, seed=args.seed)
+    if not samples:
+        log.error("No samples loaded — check dataset access.")
+        sys.exit(1)
+
+    # ------------------- backends ---------------------------------------------
+    base_backend = args.base_backend or args.backend
+    base_url_for_base = args.base_base_url or args.base_url
+    fine_backend = args.finetuned_backend or args.backend
+    base_url_for_fine = args.finetuned_base_url or args.base_url
+
+    if not args.skip_base and not base_backend:
+        log.error("Base side has no backend. Pass --backend or --base-backend, or use --skip-base.")
+        sys.exit(1)
+    if not fine_backend:
+        log.error("Fine-tuned side has no backend. Pass --backend or --finetuned-backend.")
+        sys.exit(1)
 
     log.info("Building backends ...")
-    base = make_backend(args.backend, model=args.base_model, base_url=args.base_base_url)
-    fine = make_backend(args.backend, model=args.finetuned_model, base_url=args.finetuned_base_url)
+    fine = make_backend(fine_backend, model=args.finetuned_model, base_url=base_url_for_fine)
+    if args.skip_base:
+        base = None
+        log.info("--skip-base: only the fine-tuned side will be scored.")
+    else:
+        base = make_backend(base_backend, model=args.base_model, base_url=base_url_for_base)
 
+    # ------------------- score -------------------------------------------------
     out_dir = EVAL_ROOT / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     out_dir.mkdir(parents=True, exist_ok=True)
+    log.info("Writing results to %s", out_dir)
 
     records: list[dict] = []
     for i, row in enumerate(samples):
-        log.info("[%d/%d] %s", i + 1, len(samples), row.get("region_id", "?"))
+        log.info("[%d/%d] label=%s region=%s",
+                 i + 1, len(samples), row.get("label"), row.get("region"))
         pngs = _row_to_panels(row)
         meta = _row_metadata(row)
         truth = _row_truth(row)
-        try:
-            base_pred = base(pngs, meta)
-        except Exception as exc:
-            log.warning("  base failed: %s", exc)
-            base_pred = {"error": str(exc)}
+
+        base_pred: dict
+        if base is None:
+            base_pred = {"skipped": True}
+        else:
+            try:
+                base_pred = base(pngs, meta)
+            except Exception as exc:
+                log.warning("  base failed: %s", exc)
+                base_pred = {"error": str(exc)}
+
         try:
             fine_pred = fine(pngs, meta)
         except Exception as exc:
-            log.warning("  finetuned failed: %s", exc)
+            log.warning("  fine-tuned failed: %s", exc)
             fine_pred = {"error": str(exc)}
+
         records.append({
-            "id": row.get("id", i),
-            "region_id": row.get("region_id"),
+            "id": row.get("pair_id", i),
+            "region": row.get("region"),
+            "year_before": row.get("year_before"),
+            "year_after": row.get("year_after"),
             "metadata": meta,
             "truth": truth,
             "base": base_pred,
             "finetuned": fine_pred,
         })
 
-    # Aggregate
-    def field(records, m, k):
-        return [r[m].get(k) for r in records if isinstance(r[m], dict) and k in r[m]]
-
+    # ------------------- aggregate --------------------------------------------
     truths = [r["truth"] for r in records]
 
-    summary = {
+    def col(side: str, k: str):
+        return [r[side].get(k) if isinstance(r[side], dict) else None for r in records]
+
+    summary: dict[str, Any] = {
         "n_samples": len(records),
-        "change_class_accuracy": {
-            "base": _accuracy(field(records, "base", "change_class"),
-                              [t.get("change_class") for t in truths]),
-            "finetuned": _accuracy(field(records, "finetuned", "change_class"),
-                                   [t.get("change_class") for t in truths]),
-        },
-        "severity_accuracy": {
-            "base": _accuracy(field(records, "base", "severity"),
-                              [t.get("severity") for t in truths]),
-            "finetuned": _accuracy(field(records, "finetuned", "severity"),
-                                   [t.get("severity") for t in truths]),
-        },
-        "driver_accuracy": {
-            "base": _accuracy(field(records, "base", "driver_hypothesis"),
-                              [t.get("driver_hypothesis") for t in truths]),
-            "finetuned": _accuracy(field(records, "finetuned", "driver_hypothesis"),
-                                   [t.get("driver_hypothesis") for t in truths]),
-        },
-        "area_pct_mae": {
-            "base": _mae(field(records, "base", "area_pct"),
-                         [t.get("area_pct") for t in truths]),
-            "finetuned": _mae(field(records, "finetuned", "area_pct"),
-                              [t.get("area_pct") for t in truths]),
-        },
+        "n_deforestation_truth": sum(1 for t in truths if t["deforestation"]),
+        "n_other_truth": sum(1 for t in truths if not t["deforestation"]),
     }
 
-    (out_dir / "results.json").write_text(json.dumps({"summary": summary, "samples": records}, indent=2, default=str))
+    metrics_rows = [
+        ("change_class accuracy",      "change_class",
+         lambda side: _accuracy(col(side, "change_class"), [t["change_class"] for t in truths])),
+        ("binary deforestation acc.",  "deforestation",
+         lambda side: _accuracy(
+             [_binary_deforestation_pred(p) if isinstance(p, dict) else None
+              for p in (col(side, "change_class") if False else [r[side] for r in records])],
+             [t["deforestation"] for t in truths])),
+        ("severity accuracy",          "severity",
+         lambda side: _accuracy(col(side, "severity"), [t["severity"] for t in truths])),
+        ("driver accuracy",            "driver_hypothesis",
+         lambda side: _accuracy(col(side, "driver_hypothesis"),
+                                [t["driver_hypothesis"] for t in truths])),
+        ("area_pct MAE (lower=better)", "area_pct",
+         lambda side: _mae(col(side, "area_pct"), [t["area_pct"] for t in truths])),
+    ]
+    for label, _key, fn in metrics_rows:
+        summary[label] = {
+            "base":      None if base is None else fn("base"),
+            "finetuned": fn("finetuned"),
+        }
+
+    # ------------------- persist ----------------------------------------------
+    (out_dir / "results.json").write_text(
+        json.dumps({"summary": summary, "samples": records}, indent=2, default=str)
+    )
     (out_dir / "meta.json").write_text(json.dumps({
         "args": vars(args),
         "schema": JSON_SCHEMA,
+        "panel_order": list(PANEL_ORDER),
+        "v2_image_keys": V2_IMAGE_KEYS,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }, indent=2))
 
-    # Render markdown report
+    # Markdown report
     lines = [
         f"# forestWHY evaluation — {out_dir.name}",
         "",
         f"- Dataset: `{args.dataset}` [{args.split}]",
-        f"- Backend: `{args.backend}`",
-        f"- Base model: `{args.base_model}`",
-        f"- Fine-tuned model: `{args.finetuned_model}`",
+        f"- Sampling: 50/50 deforestation / other ({summary['n_deforestation_truth']}/{summary['n_other_truth']} actual)",
+        f"- Base model: `{args.base_model}` ({base_backend or 'skipped'})",
+        f"- Fine-tuned: `{args.finetuned_model}` ({fine_backend})",
         f"- Samples scored: **{summary['n_samples']}**",
         "",
-        "| Field | Base | Fine-tuned | Δ |",
+        "| Metric | Base | Fine-tuned | Δ |",
         "|---|---|---|---|",
     ]
-    for k, label in [
-        ("change_class_accuracy", "change_class accuracy"),
-        ("severity_accuracy", "severity accuracy"),
-        ("driver_accuracy", "driver accuracy"),
-    ]:
-        b = summary[k]["base"]
-        f = summary[k]["finetuned"]
-        lines.append(f"| {label} | {b:.3f} | {f:.3f} | {f - b:+.3f} |")
-    if summary["area_pct_mae"]["finetuned"] is not None:
-        b = summary["area_pct_mae"]["base"] or 0.0
-        f = summary["area_pct_mae"]["finetuned"]
-        lines.append(f"| area_pct MAE | {b:.2f} | {f:.2f} | {f - b:+.2f} |")
+    for label, _, _ in metrics_rows:
+        b = summary[label]["base"]
+        f = summary[label]["finetuned"]
+        if b is None and f is None:
+            continue
+        b_s = "—" if b is None else (f"{b:.3f}" if isinstance(b, float) else str(b))
+        f_s = "—" if f is None else (f"{f:.3f}" if isinstance(f, float) else str(f))
+        d_s = ""
+        if isinstance(b, (int, float)) and isinstance(f, (int, float)):
+            d_s = f"{f - b:+.3f}"
+        lines.append(f"| {label} | {b_s} | {f_s} | {d_s} |")
+
     (out_dir / "report.md").write_text("\n".join(lines) + "\n")
     log.info("Wrote %s", out_dir)
 

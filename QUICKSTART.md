@@ -182,6 +182,22 @@ The loop polls SimSat every 60 s, fetches before/after Sentinel-2 13-band
 pairs whenever the satellite passes one of the 18 watched hotspots, runs
 the full panel pipeline + remote VLM, and writes one row per scoring event.
 
+**What to expect.** Most polls log `outside watched tiles` — that is normal.
+Sentinel-2's orbit takes ~100 minutes per revolution and the 18 hotspots
+are concentrated on tropical land (about 8 % of the globe). At
+`replay_speed=50` (default in step 3a) you'll see a hit roughly every
+5–30 simulation minutes. To make hits arrive faster, bump the replay
+speed:
+
+```bash
+curl -X POST http://localhost:8000/api/commands/ \
+    -H "Content-Type: application/json" \
+    -d '{"command":"set_replay_speed","replay_speed":500}'
+```
+
+Or skip the orbital wait entirely and use **§3e backfill** or **§4
+interactive dashboard** for immediate scoring.
+
 ### 3d. (Alternative) Live run with the local GGUF
 
 If you'd rather skip the GPU, the laptop GGUF backend works against live
@@ -189,10 +205,12 @@ SimSat too:
 
 ```bash
 # Terminal A: launch llama-server manually with Q8_0 (highest fidelity)
-GGUF_DIR=~/.cache/huggingface/hub/models--Siddharth63--LFM2.5-forestWHY-GGUF/snapshots/*
+# The $(echo ...) is needed to expand the snapshot-hash glob — variable
+# assignments in zsh/bash do NOT glob on their own.
+GGUF_DIR=$(echo ~/.cache/huggingface/hub/models--Siddharth63--LFM2.5-forestWHY-GGUF/snapshots/*)
 llama-server \
-    -m $GGUF_DIR/LFM2.5-forestWHY.Q8_0.gguf \
-    --mmproj $GGUF_DIR/LFM2.5-forestWHY.BF16-mmproj.gguf \
+    -m "$GGUF_DIR/LFM2.5-forestWHY.Q8_0.gguf" \
+    --mmproj "$GGUF_DIR/LFM2.5-forestWHY.BF16-mmproj.gguf" \
     --port 8080 --jinja -fa on --ctx-size 8192 -ngl 99
 
 # (Lower-quant alternatives: replace Q8_0.gguf with Q5_K_M.gguf or Q4_K_M.gguf.)
@@ -205,7 +223,13 @@ uv run python scripts/predict.py --backend llamacpp --base-url http://localhost:
 builds). On Apple Silicon, Q8_0 inference on a 14-panel input takes about
 15–25 seconds per tile.
 
-### 3e. Backfill historical tiles (optional, for the dashboard demo)
+### 3e. Backfill historical tiles (recommended for the dashboard demo)
+
+`backfill.py` skips the orbital wait — it queries SimSat's historical
+endpoint directly for every watched location. Fastest way to populate the
+dashboard with real predictions.
+
+**With a remote vLLM host:**
 
 ```bash
 uv run python scripts/backfill.py \
@@ -214,19 +238,76 @@ uv run python scripts/backfill.py \
     --years 2020 2024
 ```
 
-Iterates the 18 hotspots comparing 2020 vs 2024 — populates the dashboard
-with ~18 historical predictions in one shot. Takes ~20 min on an H100.
+**With the local GGUF (Q8_0 via `llama-server`, no GPU host needed):**
+
+```bash
+# Terminal A: launch llama-server with Q8_0 (see step 3d for the full command)
+GGUF_DIR=$(echo ~/.cache/huggingface/hub/models--Siddharth63--LFM2.5-forestWHY-GGUF/snapshots/*)
+llama-server \
+    -m "$GGUF_DIR/LFM2.5-forestWHY.Q8_0.gguf" \
+    --mmproj "$GGUF_DIR/LFM2.5-forestWHY.BF16-mmproj.gguf" \
+    --port 8080 --jinja -fa on --ctx-size 8192 -ngl 99
+
+# Terminal B: backfill against it
+uv run python scripts/backfill.py \
+    --backend llamacpp \
+    --base-url http://localhost:8080/v1 \
+    --years 2020 2024
+```
+
+Either form iterates the 18 hotspots comparing your chosen year-pair.
+Add `--location amazon_acre` (or any other id from `LOCATIONS_BY_ID`) to
+score a single tile instead of the full sweep.
+
+| Backend     | Time per tile | 18-tile sweep |
+|-------------|---------------|---------------|
+| vLLM (H100) | ~5 s          | ~2 min        |
+| GGUF Q8_0 (M3 Max Metal) | ~25 s | ~8 min |
+| GGUF Q4_K_M (CPU laptop) | ~60 s | ~20 min |
 
 ## 4. The dashboard
+
+### 4a. Launch
 
 ```bash
 uv run streamlit run app/app.py
 ```
 
-Sidebar filters by region, change_class, severity, driver, cloud cover.
-Click any row to see the 14-panel grid + the full VLM response.
+### 4b. Run an inference on demand (no SimSat orbit wait)
 
-For the base-vs-fine-tune comparator (after running `evaluate.py`):
+The sidebar **Run new inference** form auto-detects whichever backend is
+listening — vLLM (port 8000) wins, otherwise `llama-server` (port 8080).
+You can:
+
+- Pick a **named hotspot** from the dropdown (Amazon Acre, Borneo
+  Kalimantan, ...), or
+- Switch to **Custom lat/lon** and key any coordinates (e.g. a known
+  illegal-mining site or a carbon-credit project boundary you want to
+  audit).
+
+Set the before/after years, the tile size, and a cloud-cover threshold
+for the historical walkback, then click **🛰️ Run inference**. The form:
+
+1. Loads the JEPA encoder once and caches it across reruns.
+2. Calls SimSat's historical endpoint for both `before` and `after`
+   tiles (with cloud-cover walkback so you don't get a 100% clouded
+   image).
+3. Generates the 14 panels, calls the active VLM, and writes a new row
+   to SQLite.
+4. Refreshes the dashboard so the new prediction appears at the top of
+   the table — click it to see the panels and the model's prose.
+
+End-to-end on Apple Silicon + Q8_0 GGUF: about 25 seconds per inference.
+
+### 4c. Filtering existing predictions
+
+Below the inference form, the sidebar filters by region, change_class,
+severity, driver, and cloud cover. Click any row in the table to see the
+14-panel grid + the full VLM response.
+
+### 4d. Base vs fine-tuned comparator
+
+After running `evaluate.py` (§5):
 
 ```bash
 uv run streamlit run app/eval_compare.py

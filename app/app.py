@@ -7,21 +7,28 @@ Run:
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 import pydeck as pdk
+import requests
 import streamlit as st
+from dotenv import load_dotenv
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
+load_dotenv(REPO_ROOT / ".env")
 
-from forestwhy.locations import LOCATIONS  # noqa: E402
+from forestwhy.locations import LOCATIONS, LOCATIONS_BY_ID  # noqa: E402
 from forestwhy.prompts import PANEL_ORDER  # noqa: E402
 
 DB_PATH = REPO_ROOT / "predictions.db"
+IMAGES_ROOT = REPO_ROOT / "db_images"
 
 st.set_page_config(page_title="forestWHY", layout="wide")
 st.title("forestWHY — On-orbit Deforestation Detection")
@@ -41,6 +48,95 @@ def _load_predictions(db_path: str) -> pd.DataFrame:
     return pd.DataFrame([dict(r) for r in rows])
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Live inference: backend probe + cached encoder
+# ─────────────────────────────────────────────────────────────────────────────
+
+@st.cache_resource(show_spinner="Loading JEPA encoder (1.2 GB, ~5 s on first run)...")
+def _get_encoder():
+    """Cache the JEPA encoder across reruns. Streamlit holds it in process memory."""
+    from forestwhy.jepa import load_jepa_encoder
+    enc = load_jepa_encoder(device="auto")
+    device = next(enc.parameters()).device.type
+    return enc, device
+
+
+def _probe_backend(name: str, base_url: str, timeout: float = 1.5) -> Optional[dict]:
+    try:
+        r = requests.get(f"{base_url}/models", timeout=timeout)
+        if not r.ok:
+            return None
+        payload = r.json()
+        items = payload.get("data") or payload.get("models") or []
+        model_id = items[0].get("id") if items and isinstance(items[0], dict) else None
+        return {"backend": name, "base_url": base_url, "model": model_id or "unknown"}
+    except (requests.RequestException, ValueError):
+        return None
+
+
+def _detect_backend() -> Optional[dict]:
+    """Probe the two known endpoints. vLLM (port 8000) wins over llama-server (8080)."""
+    for name, url in [
+        ("vllm",     os.environ.get("VLM_BASE_URL", "http://localhost:8000/v1")),
+        ("llamacpp", os.environ.get("LLAMA_BASE_URL", "http://localhost:8080/v1")),
+    ]:
+        info = _probe_backend(name, url)
+        if info is not None:
+            return info
+    return None
+
+
+def _run_inference(
+    *, lon: float, lat: float, region_id: str, biome: str, country: str,
+    year_before: int, year_after: int, size_km: float, max_cloud_cover: Optional[float],
+    backend_info: dict,
+) -> int:
+    """Fetch a temporal pair from SimSat, score it, write a DB row. Returns row id."""
+    from forestwhy.db import init_db
+    from forestwhy.evaluator import make_backend, model_name
+    from forestwhy.live import fetch_13band_at_with_walkback
+    from forestwhy.pipeline import score_tile
+
+    encoder, enc_device = _get_encoder()
+    predict = make_backend(
+        backend_info["backend"],
+        model=backend_info["model"],
+        base_url=backend_info["base_url"],
+    )
+    label = model_name(backend_info["backend"], backend_info["model"])
+
+    before_target = datetime(year_before, 7, 15, tzinfo=timezone.utc)
+    after_target = datetime(year_after, 7, 15, tzinfo=timezone.utc)
+
+    before_arr, before_meta = fetch_13band_at_with_walkback(
+        lon=lon, lat=lat, target_ts=before_target,
+        size_km=size_km, max_cloud_cover_pct=max_cloud_cover,
+    )
+    after_arr, after_meta = fetch_13band_at_with_walkback(
+        lon=lon, lat=lat, target_ts=after_target,
+        size_km=size_km, max_cloud_cover_pct=max_cloud_cover,
+    )
+
+    conn = init_db(DB_PATH)
+    row_id = score_tile(
+        conn=conn, images_root=IMAGES_ROOT,
+        encoder=encoder, encoder_device=enc_device,
+        predict=predict, backend_name=backend_info["backend"], model_label=label,
+        lon=lon, lat=lat, size_km=size_km,
+        region_id=region_id, biome=biome, country=country,
+        before=before_arr, after=after_arr,
+        before_timestamp=before_meta.get("achieved_timestamp")
+                          or before_target.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        after_timestamp=after_meta.get("achieved_timestamp")
+                         or after_target.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        before_cloud_cover=before_meta.get("cloud_cover"),
+        after_cloud_cover=after_meta.get("cloud_cover"),
+        source="dashboard",
+    )
+    conn.close()
+    return row_id
+
+
 df = _load_predictions(str(DB_PATH))
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -48,11 +144,71 @@ df = _load_predictions(str(DB_PATH))
 # ─────────────────────────────────────────────────────────────────────────────
 
 with st.sidebar:
+    st.header("Run new inference")
+    backend_info = _detect_backend()
+    if backend_info:
+        st.success(
+            f"**{backend_info['backend']}** at `{backend_info['base_url']}`  \n"
+            f"model: `{backend_info['model']}`"
+        )
+    else:
+        st.warning(
+            "No backend running. Start one in another terminal:\n\n"
+            "**vLLM** (GPU) → `vllm serve Siddharth63/LFM2.5-forestWHY --port 8000`\n\n"
+            "**llama-server** (laptop) → see `QUICKSTART.md` §3d."
+        )
+
+    with st.form("run_inference", clear_on_submit=False):
+        mode = st.radio("Location", ["Named hotspot", "Custom lat/lon"], horizontal=True)
+        if mode == "Named hotspot":
+            loc_id = st.selectbox("Hotspot", list(LOCATIONS_BY_ID))
+            _loc = LOCATIONS_BY_ID[loc_id]
+            in_lon, in_lat = _loc.lon, _loc.lat
+            in_biome, in_country = _loc.biome, _loc.country
+            in_region = _loc.id
+            st.caption(f"{_loc.country} · {_loc.biome} · ({_loc.lon:.4f}, {_loc.lat:.4f})")
+        else:
+            c1, c2 = st.columns(2)
+            in_lon = c1.number_input("Longitude", value=-68.4, min_value=-180.0, max_value=180.0, format="%.4f")
+            in_lat = c2.number_input("Latitude",  value=-9.1,  min_value=-90.0,  max_value=90.0,  format="%.4f")
+            in_region = st.text_input("Region label", value=f"custom_{in_lon:.2f}_{in_lat:.2f}")
+            in_biome = "custom"
+            in_country = "custom"
+
+        c1, c2 = st.columns(2)
+        year_before = c1.number_input("Before year", min_value=2017, max_value=2026, value=2020, step=1)
+        year_after  = c2.number_input("After year",  min_value=2017, max_value=2026, value=2024, step=1)
+        size_km = st.slider("Tile size (km)", 1.0, 10.0, 5.0, 0.5)
+        max_cc  = st.slider("Max cloud cover (%) for walkback", 0, 100, 60, 5)
+
+        submitted = st.form_submit_button(
+            "🛰️  Run inference",
+            disabled=(backend_info is None),
+            use_container_width=True,
+        )
+
+    if submitted and backend_info:
+        try:
+            with st.spinner(f"Fetching tiles + scoring (~{15 if backend_info['backend']=='vllm' else 25} s)..."):
+                new_id = _run_inference(
+                    lon=in_lon, lat=in_lat, region_id=in_region,
+                    biome=in_biome, country=in_country,
+                    year_before=int(year_before), year_after=int(year_after),
+                    size_km=float(size_km),
+                    max_cloud_cover=(None if max_cc >= 100 else float(max_cc)),
+                    backend_info=backend_info,
+                )
+            st.success(f"Wrote row #{new_id}. Refreshing dashboard ...")
+            st.cache_data.clear()      # invalidate _load_predictions
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Inference failed: {exc}")
+
+    st.divider()
     st.header("Filters")
     if df.empty:
         st.info(
-            "No predictions yet. Run `uv run python scripts/predict.py --smoke-test --backend stub` "
-            "to seed a test row, or start the live watch loop."
+            "No predictions yet. Use **Run new inference** above, or run `predict.py` from the CLI."
         )
     region_filter = st.multiselect(
         "Region",

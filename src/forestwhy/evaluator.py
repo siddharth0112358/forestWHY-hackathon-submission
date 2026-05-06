@@ -80,47 +80,224 @@ def _parse_response(text: str) -> dict:
     return {"reasoning": text}
 
 
+# Vocabulary the LFM2.5-forestWHY fine-tune actually uses in its 10-step prose.
+# Order within each list does not matter; order across lists DOES — earlier
+# entries win. We score class by total occurrence count across synonyms,
+# breaking ties by the order below.
+_CLASS_SYNONYMS: list[tuple[str, tuple[str, ...]]] = [
+    ("deforestation", (
+        "deforestation", "deforested", "forest loss", "canopy loss",
+        "clearing", "cleared", "clear-cut", "clearcut", "clear cut",
+        "logging", "logged", "selective logging", "logging tracks",
+        "canopy disturbance", "forest degradation", "degraded",
+        "bare soil", "exposed soil", "newly cleared",
+    )),
+    ("fire_disturbance", (
+        "fire", "burned", "burn scar", "burn scars", "wildfire",
+        "fire damage", "scorched", "charred",
+    )),
+    ("afforestation", (
+        "afforestation", "reforestation", "regrowth", "secondary growth",
+        "regenerating forest", "tree planting", "natural regeneration",
+    )),
+    ("stable_forest", (
+        "intact forest", "intact tropical forest", "undisturbed",
+        "unchanged", "no significant change", "no observable change",
+        "stable canopy", "dense canopy", "primary forest",
+    )),
+    ("stable_non_forest", (
+        "stable_non_forest", "established agriculture", "stable pasture",
+        "stable cropland", "no forest", "non-forest", "open canopy",
+    )),
+    ("ambiguous", (
+        "ambiguous", "unclear", "uncertain", "inconclusive",
+        "cannot be determined", "obscured by cloud", "cloud cover",
+    )),
+]
+
+_SEVERITY_SYNONYMS: list[tuple[str, tuple[str, ...]]] = [
+    ("high",   ("high severity", "severe", "extensive", "large-scale", "widespread", "major")),
+    ("medium", ("moderate", "medium severity", "mid-scale", "noticeable")),
+    ("low",    ("minor", "low severity", "limited", "small", "localised", "localized", "patchy")),
+    ("none",   ("no change", "no observable change", "no significant change", "stable")),
+]
+
+_DRIVER_SYNONYMS: list[tuple[str, tuple[str, ...]]] = [
+    ("agricultural_clearing", (
+        "agricultural clearing", "agricultural expansion",
+        "agriculture", "agricultural",
+        "soy", "soybean", "cattle", "ranching", "pasture", "cropland",
+    )),
+    ("logging_road", (
+        "logging road", "logging roads", "logging tracks",
+        "selective logging", "timber extraction", "timber harvesting",
+        "logging concession", "skid trail",
+    )),
+    ("mining", ("mining", "gold mining", "artisanal mining", "tailings pond")),
+    ("fire", ("wildfire", "burn scar", "burn scars", "fire damage", "burned area")),
+    ("flood", ("flood", "flooding", "inundation", "river migration")),
+    ("plantation", (
+        "oil palm", "palm plantation", "rubber plantation",
+        "monoculture", "tree plantation",
+    )),
+    ("natural_regrowth", (
+        "natural regrowth", "secondary regrowth", "regeneration",
+        "regenerating forest",
+    )),
+]
+
+
+_NEGATION_TOKENS = (
+    "no ", "not ", "absent", "absence of", "lacks", "without",
+    "no clear", "no significant", "no observable", "no distinct",
+    "would indicate", "no evidence",
+)
+
+import re as _re
+
+def _count_synonym_hits(text: str, synonyms: tuple[str, ...]) -> int:
+    """Word-boundary matches, excluding negated mentions within the same sentence."""
+    total = 0
+    for s in synonyms:
+        for m in _re.finditer(rf"\b{_re.escape(s)}\b", text):
+            start = m.start()
+            # Look back to the previous sentence boundary (or start of text).
+            sentence_start = max(
+                text.rfind(". ", 0, start),
+                text.rfind("\n", 0, start),
+                0,
+            )
+            window = text[sentence_start: start]
+            if any(neg in window for neg in _NEGATION_TOKENS):
+                continue
+            total += 1
+    return total
+
+
+def _conclusion_text(text: str) -> str:
+    """Return the model's synthesis section. Looks for Step 8 onward, else
+    falls back to the last 35 % of the text."""
+    m = _re.search(r"##\s*step\s*8\b", text, flags=_re.IGNORECASE)
+    if m is not None:
+        return text[m.start():]
+    return text[int(len(text) * 0.65):]
+
+
+def _classify(text: str, vocab: list[tuple[str, tuple[str, ...]]]) -> Optional[str]:
+    """Return the class with the most synonym hits in `text`. None if no hits."""
+    best, best_count = None, 0
+    for cls, syns in vocab:
+        c = _count_synonym_hits(text, syns)
+        if c > best_count:
+            best, best_count = cls, c
+    return best
+
+
+def _extract_area_pct(text: str) -> Optional[float]:
+    """Find the LARGEST 'X%' or 'X percent' mention; the model's final
+    estimate tends to be the highest figure quoted."""
+    import re
+    candidates: list[float] = []
+    for m in re.findall(r"(\d{1,3}(?:\.\d+)?)\s*(?:%|percent)", text):
+        try:
+            v = float(m)
+            if 0.0 <= v <= 100.0:
+                candidates.append(v)
+        except ValueError:
+            continue
+    if not candidates:
+        return None
+    return max(candidates)
+
+
+def _payload_text(payload: dict) -> str:
+    """Concatenate all string-typed values in the payload (recursive shallow)."""
+    parts: list[str] = []
+    def walk(v):
+        if isinstance(v, str):
+            parts.append(v)
+        elif isinstance(v, dict):
+            for x in v.values():
+                walk(x)
+        elif isinstance(v, list):
+            for x in v:
+                walk(x)
+    walk(payload)
+    return " ".join(parts).lower()
+
+
 def _normalize(payload: dict) -> dict:
     """Coerce arbitrary VLM output into the dashboard's expected fields.
 
-    Always preserves the original under `raw` so the dashboard can display
-    the model's full response unchanged.
+    The fine-tune emits free-form prose with a 10-step reasoning protocol, so
+    this function does best-effort extraction via synonym counting. The full
+    raw payload is always preserved under `raw` for audit.
     """
     out: dict = {"raw": payload}
 
+    # Direct passthrough for any structured fields the model already emits.
     for k in DASHBOARD_FIELDS:
         if k in payload:
             out[k] = payload[k]
 
-    if "change_class" not in out:
-        forest_loss = _truthy(_dig(payload, "change_forest", "confidence"))
-        forest_gain = _truthy(_dig(payload, "change_non_forest", "afforestation_confidence"))
-        if forest_loss:
-            out["change_class"] = "deforestation"
-        elif forest_gain:
-            out["change_class"] = "afforestation"
+    text = _payload_text(payload)
+    # Use the synthesis section (Step 8 onward, or last 35 %) for classification.
+    # The model's earlier steps describe what it sees; the synthesis is its conclusion.
+    conclusion = _conclusion_text(text)
+
+    # change_class
+    if "change_class" not in out or out["change_class"] is None:
+        cls = _classify(conclusion, _CLASS_SYNONYMS)
+        if cls is not None:
+            out["change_class"] = cls
+
+    # severity
+    if "severity" not in out or out["severity"] is None:
+        sev = _classify(conclusion, _SEVERITY_SYNONYMS)
+        if sev is not None:
+            out["severity"] = sev
+
+    # driver — only meaningful when the model thinks change happened
+    if "driver_hypothesis" not in out or out["driver_hypothesis"] is None:
+        if out.get("change_class") in ("deforestation", "fire_disturbance", "afforestation"):
+            drv = _classify(conclusion, _DRIVER_SYNONYMS)
+            if drv is not None:
+                out["driver_hypothesis"] = drv
+            else:
+                out["driver_hypothesis"] = "unknown"
         else:
-            text = json.dumps(payload).lower()
-            for key in (
-                "deforestation", "afforestation", "fire_disturbance",
-                "stable_forest", "stable_non_forest", "ambiguous",
-            ):
-                if key in text:
-                    out["change_class"] = key
-                    break
+            out["driver_hypothesis"] = None
 
-    if "reasoning" not in out:
-        out["reasoning"] = json.dumps(payload)[:600]
+    # area_pct
+    if "area_pct" not in out or out["area_pct"] is None:
+        mag = _dig(payload, "change_forest", "measured_magnitude")
+        if isinstance(mag, (int, float)):
+            out["area_pct"] = max(0.0, min(100.0, float(mag) * 100.0))
+        else:
+            ap = _extract_area_pct(conclusion)
+            if ap is None:
+                ap = _extract_area_pct(text)
+            if ap is not None:
+                out["area_pct"] = ap
 
+    # confidence
     if "confidence" in out and isinstance(out["confidence"], str):
         out["confidence"] = {"low": 0.3, "medium": 0.6, "high": 0.9}.get(
             out["confidence"].lower(), 0.5
         )
+    elif "confidence" not in out or out["confidence"] is None:
+        # Heuristic: if classification succeeded, use the synonym hit count
+        # as a proxy. ≥3 hits → 0.7, ≥1 → 0.5, else None.
+        if out.get("change_class"):
+            for cls, syns in _CLASS_SYNONYMS:
+                if cls == out["change_class"]:
+                    hits = _count_synonym_hits(text, syns)
+                    out["confidence"] = 0.7 if hits >= 3 else (0.5 if hits >= 1 else 0.3)
+                    break
 
-    if "area_pct" not in out:
-        mag = _dig(payload, "change_forest", "measured_magnitude")
-        if isinstance(mag, (int, float)):
-            out["area_pct"] = max(0.0, min(100.0, float(mag) * 100.0))
+    # reasoning fallback
+    if "reasoning" not in out or not out["reasoning"]:
+        out["reasoning"] = (text[:600] + ("…" if len(text) > 600 else "")) if text else ""
 
     try:
         jsonschema.validate(out, JSON_SCHEMA)
@@ -152,7 +329,7 @@ def vllm_backend(
     base_url: str = "http://localhost:8000/v1",
     model: str = "Siddharth63/LFM2.5-forestWHY",
     timeout: float = 180.0,
-    max_tokens: int = 1024,
+    max_tokens: int = 4096,
     temperature: float = 0.2,
 ) -> PredictFn:
     """Return a PredictFn that calls a running vLLM server."""
@@ -194,7 +371,7 @@ def llamacpp_backend(
     base_url: str = "http://localhost:8080/v1",
     model: str = "forestwhy",
     timeout: float = 240.0,
-    max_tokens: int = 1024,
+    max_tokens: int = 4096,
     temperature: float = 0.2,
 ) -> PredictFn:
     """Return a PredictFn that calls a llama-server (mmproj + GGUF)."""
