@@ -30,9 +30,171 @@ from forestwhy.prompts import PANEL_ORDER  # noqa: E402
 DB_PATH = REPO_ROOT / "predictions.db"
 IMAGES_ROOT = REPO_ROOT / "db_images"
 
-st.set_page_config(page_title="forestWHY", layout="wide")
-st.title("forestWHY — On-orbit Deforestation Detection")
-st.caption("Live predictions from LFM2.5-forestWHY over Sentinel-2 imagery (SimSat).")
+st.set_page_config(page_title="forestWHY", layout="wide", page_icon="🛰️")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Global styling
+# ─────────────────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+:root {
+  --fw-bg-card:        rgba(255,255,255,0.03);
+  --fw-bg-card-strong: rgba(255,255,255,0.06);
+  --fw-border:         rgba(255,255,255,0.10);
+  --fw-text-dim:       rgba(255,255,255,0.62);
+  --fw-accent:         #4ec9b0;
+}
+
+.block-container { padding-top: 2rem; padding-bottom: 3rem; max-width: 1500px; }
+
+/* Title */
+h1 { font-weight: 700 !important; letter-spacing: -0.5px; }
+
+/* Section headings */
+.fw-section {
+    font-size: 14px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--fw-text-dim);
+    margin: 28px 0 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--fw-border);
+}
+
+/* Hero card */
+.fw-hero {
+    background: linear-gradient(135deg,
+        rgba(78,201,176,0.06),
+        rgba(255,255,255,0.02));
+    border: 1px solid var(--fw-border);
+    border-radius: 12px;
+    padding: 20px 24px;
+    margin-bottom: 14px;
+}
+.fw-hero-title {
+    font-size: 18px;
+    font-weight: 600;
+    letter-spacing: -0.2px;
+    margin-bottom: 10px;
+}
+.fw-hero-meta {
+    color: var(--fw-text-dim);
+    font-size: 13px;
+    line-height: 1.6;
+    font-feature-settings: "tnum";
+}
+.fw-hero-meta code {
+    background: var(--fw-bg-card-strong);
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 12px;
+}
+
+/* Badges */
+.fw-badge {
+    display: inline-block;
+    padding: 4px 11px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    margin-right: 6px;
+    margin-bottom: 4px;
+    border: 1px solid transparent;
+}
+.fw-cls-deforestation     { background: rgba(220,50,47,0.18);  color: #f38680; border-color: rgba(220,50,47,0.55); }
+.fw-cls-fire_disturbance  { background: rgba(203,75,22,0.18);  color: #ed9456; border-color: rgba(203,75,22,0.55); }
+.fw-cls-afforestation     { background: rgba(133,153,0,0.20);  color: #b9c952; border-color: rgba(133,153,0,0.55); }
+.fw-cls-stable_forest     { background: rgba(38,139,210,0.20); color: #6bb1e0; border-color: rgba(38,139,210,0.55); }
+.fw-cls-stable_non_forest { background: rgba(101,123,131,0.25);color: #9eb1b9; border-color: rgba(101,123,131,0.55); }
+.fw-cls-ambiguous         { background: rgba(181,137,0,0.18);  color: #d8b454; border-color: rgba(181,137,0,0.55); }
+.fw-cls-                  { background: rgba(120,120,120,0.18);color: #aaa;    border-color: rgba(120,120,120,0.40); }
+
+.fw-sev-high   { background: rgba(220,50,47,0.16);   color: #f38680; }
+.fw-sev-medium { background: rgba(255,165,0,0.16);   color: #ffbd66; }
+.fw-sev-low    { background: rgba(133,153,0,0.16);   color: #b9c952; }
+.fw-sev-none   { background: rgba(120,120,120,0.16); color: #aaa;    }
+
+.fw-driver { background: rgba(78,201,176,0.12); color: #6fcfba; border-color: rgba(78,201,176,0.40); }
+
+/* Reasoning card */
+.fw-reasoning {
+    background: var(--fw-bg-card);
+    border: 1px solid var(--fw-border);
+    border-radius: 10px;
+    padding: 18px 22px;
+    max-height: 460px;
+    overflow-y: auto;
+    font-size: 14.5px;
+    line-height: 1.7;
+    font-family: -apple-system, system-ui, "SF Pro Text", "Segoe UI", sans-serif;
+    color: rgba(255,255,255,0.88);
+}
+.fw-reasoning h2 {
+    font-size: 14px !important;
+    font-weight: 600;
+    color: var(--fw-accent);
+    margin: 16px 0 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+}
+.fw-reasoning h2:first-child { margin-top: 0; }
+.fw-reasoning strong { color: rgba(255,255,255,0.95); }
+.fw-reasoning::-webkit-scrollbar { width: 8px; }
+.fw-reasoning::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 4px; }
+
+/* Metric tweaks */
+[data-testid="stMetric"] {
+    background: var(--fw-bg-card);
+    border: 1px solid var(--fw-border);
+    padding: 14px 16px;
+    border-radius: 10px;
+}
+[data-testid="stMetricLabel"] {
+    color: var(--fw-text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    font-size: 11px !important;
+}
+[data-testid="stMetricValue"] {
+    font-size: 20px !important;
+    font-weight: 600;
+}
+
+/* Panel grid captions */
+.fw-panel-cap {
+    color: var(--fw-text-dim);
+    font-size: 11px;
+    margin-top: 4px;
+    margin-bottom: 8px;
+    text-align: center;
+    letter-spacing: 0.3px;
+}
+
+/* Sidebar polish */
+section[data-testid="stSidebar"] { border-right: 1px solid var(--fw-border); }
+section[data-testid="stSidebar"] h2 { font-size: 16px !important; margin-top: 12px; }
+
+/* Buttons */
+button[data-testid="baseButton-secondaryFormSubmit"],
+button[data-testid="stBaseButton-secondaryFormSubmit"] {
+    font-weight: 600 !important;
+    letter-spacing: 0.4px;
+}
+
+/* Map container */
+[data-testid="stDeckGlJsonChart"] {
+    border-radius: 10px;
+    overflow: hidden;
+    border: 1px solid var(--fw-border);
+}
+</style>
+""", unsafe_allow_html=True)
+
+st.title("forestWHY")
+st.caption("On-orbit deforestation detection from Sentinel-2 imagery, powered by LFM2.5-forestWHY + I-JEPA.")
 
 
 @st.cache_data(ttl=10.0)
@@ -247,7 +409,8 @@ if not filtered.empty:
 # Map
 # ─────────────────────────────────────────────────────────────────────────────
 
-st.subheader("Watched hotspots and recent predictions")
+st.markdown('<div class="fw-section">Map · 18 watched hotspots and recent predictions</div>',
+            unsafe_allow_html=True)
 
 hotspot_df = pd.DataFrame([{
     "id": loc.id, "lon": loc.lon, "lat": loc.lat,
@@ -293,9 +456,12 @@ st.pydeck_chart(pdk.Deck(
 # Predictions table + detail view
 # ─────────────────────────────────────────────────────────────────────────────
 
-st.subheader(f"Predictions ({len(filtered)} of {len(df)})")
+st.markdown(
+    f'<div class="fw-section">Predictions · showing {len(filtered)} of {len(df)} total</div>',
+    unsafe_allow_html=True,
+)
 if filtered.empty:
-    st.write("No rows match the current filters.")
+    st.info("No rows match the current filters. Adjust filters in the sidebar or run a new inference.")
     st.stop()
 
 table_cols = [
@@ -311,40 +477,68 @@ st.dataframe(filtered[present], use_container_width=True, height=300)
 selected = st.selectbox(
     "Inspect prediction id",
     options=filtered["id"].tolist(),
-    format_func=lambda i: f"#{i}  {filtered.loc[filtered['id'] == i, 'region_id'].iloc[0]}  "
-                          f"{filtered.loc[filtered['id'] == i, 'change_class'].iloc[0]}",
+    format_func=lambda i: f"#{i}  ·  {filtered.loc[filtered['id'] == i, 'region_id'].iloc[0]}  "
+                          f"·  {filtered.loc[filtered['id'] == i, 'change_class'].iloc[0] or '—'}",
 )
 
 row = filtered.loc[filtered["id"] == selected].iloc[0]
 
-c1, c2 = st.columns([2, 1])
-with c1:
-    st.markdown(f"**Tile:** {row['region_id']} ({row['lon']:.4f}, {row['lat']:.4f}) "
-                f"size {row['size_km']} km")
-    st.markdown(f"**Window:** {row['before_timestamp']} → {row['after_timestamp']}")
-    cc_before = row.get("before_cloud_cover")
-    cc_after = row.get("after_cloud_cover")
-    if pd.notna(cc_before) or pd.notna(cc_after):
-        st.markdown(f"**Cloud cover:** before={cc_before}  after={cc_after}")
-with c2:
-    st.metric("change_class", row["change_class"] or "—")
-    st.metric("severity", row["severity"] or "—")
-    st.metric("driver", row["driver_hypothesis"] or "—")
-    st.metric("confidence", f"{row['confidence']:.2f}" if pd.notna(row["confidence"]) else "—")
-    if pd.notna(row.get("area_pct")):
-        st.metric("area_pct", f"{row['area_pct']:.1f}%")
-
-if row.get("reasoning"):
-    st.markdown("**Reasoning**")
-    st.write(row["reasoning"])
-if row.get("cloud_cover_note"):
-    st.caption(f"Cloud-cover note: {row['cloud_cover_note']}")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 14-panel grid
+# Hero card
 # ─────────────────────────────────────────────────────────────────────────────
 
-st.subheader("14-panel input")
+import html as _html
+
+def _fmt_cc(v) -> str:
+    return f"{float(v):.1f}%" if pd.notna(v) else "n/a"
+
+
+def _badge(label: str, css_class: str) -> str:
+    return f'<span class="fw-badge {css_class}">{_html.escape(str(label))}</span>'
+
+
+cls = row["change_class"] or ""
+sev = row["severity"] or "none"
+drv = row["driver_hypothesis"]
+
+badges = [_badge((cls or "—").replace("_", " "), f"fw-cls-{cls}")]
+badges.append(_badge(f"{sev} severity", f"fw-sev-{sev}"))
+if drv and drv not in ("None", "unknown"):
+    badges.append(_badge(drv.replace("_", " "), "fw-driver fw-badge"))
+
+hero = f"""
+<div class="fw-hero">
+    <div class="fw-hero-title">{' '.join(badges)}</div>
+    <div class="fw-hero-meta">
+        <code>{_html.escape(row['region_id'])}</code> ·
+        ({row['lon']:.4f}, {row['lat']:.4f}) ·
+        {row['size_km']:.1f} km tile ·
+        <code>{_html.escape(str(row.get('model') or '—'))}</code>
+        <br>
+        <strong>{row['before_timestamp']}</strong> → <strong>{row['after_timestamp']}</strong> ·
+        cloud cover: before {_fmt_cc(row.get('before_cloud_cover'))}, after {_fmt_cc(row.get('after_cloud_cover'))}
+    </div>
+</div>
+"""
+st.markdown(hero, unsafe_allow_html=True)
+
+
+# Quick metrics row
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Change class", (row["change_class"] or "—").replace("_", " "))
+m2.metric("Severity",     (row["severity"] or "—").title())
+m3.metric("Area affected", f"{row['area_pct']:.1f}%" if pd.notna(row.get("area_pct")) else "—")
+m4.metric("Confidence",
+          f"{row['confidence']:.2f}" if pd.notna(row["confidence"]) else "—")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 14-panel grid (7 cols × 2 rows, fixed pixel size)
+# ─────────────────────────────────────────────────────────────────────────────
+
+st.markdown('<div class="fw-section">14-panel input</div>', unsafe_allow_html=True)
+
 manifest_raw = row.get("panels_manifest")
 manifest: list[dict] = []
 if manifest_raw:
@@ -357,20 +551,66 @@ if not manifest:
     st.info("Panel artefacts not found on disk for this row.")
 else:
     panel_index = {m["name"]: m["path"] for m in manifest}
-    cols_per_row = 4
+    cols_per_row = 7
+    panel_size_px = 180
     for i in range(0, len(PANEL_ORDER), cols_per_row):
-        row_cols = st.columns(cols_per_row)
+        row_cols = st.columns(cols_per_row, gap="small")
         for j, name in enumerate(PANEL_ORDER[i:i + cols_per_row]):
             rel = panel_index.get(name)
             if rel is None:
                 continue
             full = REPO_ROOT / rel
-            if not full.exists():
-                row_cols[j].caption(f"{name}: missing")
-                continue
-            row_cols[j].image(str(full), caption=f"{i + j + 1}. {name}", width="stretch")
+            with row_cols[j]:
+                if not full.exists():
+                    st.caption(f"{name}: missing")
+                    continue
+                st.image(str(full), width=panel_size_px)
+                st.markdown(
+                    f'<div class="fw-panel-cap">{i + j + 1}. {name.replace("_", " ")}</div>',
+                    unsafe_allow_html=True,
+                )
 
-with st.expander("Raw VLM JSON"):
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Reasoning — scrollable, readable
+# ─────────────────────────────────────────────────────────────────────────────
+
+if row.get("reasoning"):
+    st.markdown('<div class="fw-section">Model reasoning (10-step protocol)</div>',
+                unsafe_allow_html=True)
+
+    def _md_lite_to_html(text: str) -> str:
+        """Tiny converter for the model's '## Step N:' markdown."""
+        out: list[str] = []
+        for raw_line in text.split("\n"):
+            line = raw_line.rstrip()
+            if not line:
+                out.append("<br>")
+                continue
+            if line.startswith("### "):
+                out.append(f"<h3>{_html.escape(line[4:])}</h3>")
+            elif line.startswith("## "):
+                out.append(f"<h2>{_html.escape(line[3:])}</h2>")
+            elif line.startswith("# "):
+                out.append(f"<h2>{_html.escape(line[2:])}</h2>")
+            else:
+                escaped = _html.escape(line)
+                # Bold **...**
+                import re as _re_local
+                escaped = _re_local.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
+                out.append(f"<p style='margin: 4px 0;'>{escaped}</p>")
+        return "\n".join(out)
+
+    st.markdown(
+        f'<div class="fw-reasoning">{_md_lite_to_html(row["reasoning"])}</div>',
+        unsafe_allow_html=True,
+    )
+
+if row.get("cloud_cover_note"):
+    st.caption(f"☁️  Cloud-cover note from model: {row['cloud_cover_note']}")
+
+
+with st.expander("Raw VLM JSON (audit trail)"):
     raw = row.get("raw_response")
     if raw:
         try:
