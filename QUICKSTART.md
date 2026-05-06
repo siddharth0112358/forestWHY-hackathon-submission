@@ -115,16 +115,41 @@ the production-shaped flow.
 
 ```bash
 git clone https://github.com/DPhi-Space/SimSat ../SimSat
-cd ../SimSat && docker compose up -d
+cd ../SimSat
+# SimSat's `sim` container imports a Mapbox provider at boot and crashes
+# without MAPBOX_ACCESS_TOKEN. We do not call the Mapbox endpoint, so any
+# non-empty string is fine. To use the real Mapbox endpoint, get a free
+# token at https://account.mapbox.com/access-tokens and set it here.
+MAPBOX_ACCESS_TOKEN=dummy_token_for_sentinel_only docker compose up -d
 ```
 
-Verify:
+Once both containers report healthy (`docker ps` should show
+`fakesat-dashboard` on :8000 and `fakesat-sim` on :9005), start the orbit
+(it boots paused at lon=0, lat=0):
+
+```bash
+curl -X POST http://localhost:8000/api/commands/ \
+    -H "Content-Type: application/json" \
+    -d '{"command":"start","step_size_seconds":20,"replay_speed":50}'
+```
+
+Or open http://localhost:8000 and click the **Start** button on the
+dashboard.
+
+Verify connectivity:
 
 ```bash
 cd /path/to/forestWHY-hackathon-submission
-uv run python -m forestwhy.live --probe       # confirms band-name convention
-uv run python -m forestwhy.live --position    # prints current sat lon/lat
+uv run python -m forestwhy.live --probe         # API healthy + band info
+uv run python -m forestwhy.live --position      # current sat lon/lat
+uv run python -m forestwhy.live --current       # fetch (13, H, W) tile (over land only)
 ```
+
+The probe reports the 12 spectral bands SimSat exposes from Sentinel-2
+L2A: `coastal, blue, green, red, rededge1, rededge2, rededge3, nir,
+nir08, nir09, swir16, swir22`. Sentinel-2 L2A drops B10/cirrus during
+processing; `live.py` zero-pads that channel so the JEPA encoder still
+sees a `(13, H, W)` input.
 
 ### 3b. Start vLLM on a CUDA host
 
@@ -221,8 +246,19 @@ Outputs `evals/<timestamp>/`:
 - The repo `Siddharth63/forestWHY-JEPA-vitl` is public, so this should not normally happen.
 
 **`SimSat not reachable at http://localhost:9005`**
-- `docker ps` and check the `simsat` container is running.
-- If the container exited, `cd SimSat && docker compose logs simsat | tail -50` to see why.
+- `docker ps` and check that **both** `fakesat-dashboard` and `fakesat-sim` containers are up.
+- If `fakesat-sim` exited, `docker logs fakesat-sim | tail -20`. The most common cause is missing `MAPBOX_ACCESS_TOKEN`. Fix:
+  ```bash
+  cd ../SimSat
+  MAPBOX_ACCESS_TOKEN=dummy_token_for_sentinel_only docker compose up -d --force-recreate sim
+  ```
+- After both containers are healthy, the orbit simulator must be **manually started** via the dashboard UI or `POST /api/commands/ {"command":"start"}` — see step 3a above. Until then `lon-lat-alt` returns `[0,0,0]`.
+
+**`SimSat reported no image available` over open ocean**
+- Correct behaviour. Sentinel-2 doesn't cover open oceans. Use `predict.py` against named land hotspots (`--location amazon_acre`) or wait for the orbit to cross land.
+
+**Probe shows only 12 bands instead of 13**
+- Correct. Sentinel-2 L2A doesn't retain B10 (cirrus); SimSat ships L2A. `live.py` zero-pads B10 in the JEPA input. The JEPA encoder's B10 weights contribute negligibly to the change-detection panels.
 
 **vLLM out-of-memory on the VLM**
 - Reduce `--max-model-len 4096` and pass `--max-num-seqs 1` to vLLM.
