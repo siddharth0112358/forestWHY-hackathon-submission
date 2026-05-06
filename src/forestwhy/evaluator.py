@@ -23,7 +23,7 @@ from typing import Any, Callable, Optional, Protocol, Sequence
 
 import jsonschema
 
-from .prompts import JSON_SCHEMA, SYSTEM_PROMPT, render_user_prompt
+from .prompts import DASHBOARD_FIELDS, JSON_SCHEMA, SYSTEM_PROMPT, render_user_prompt
 
 log = logging.getLogger(__name__)
 
@@ -55,25 +55,93 @@ def _build_messages(panel_pngs: Sequence[bytes], metadata: dict) -> list[dict]:
     ]
 
 
-def _validate(payload: dict) -> dict:
-    try:
-        jsonschema.validate(payload, JSON_SCHEMA)
-    except jsonschema.ValidationError as exc:
-        raise BackendError(f"VLM response did not match JSON_SCHEMA: {exc.message}") from exc
-    return payload
-
-
 def _parse_response(text: str) -> dict:
-    text = text.strip()
-    # Strip markdown fences if the model wrapped the JSON
+    """Parse the VLM response.
+
+    The fine-tune emits free-form prose (10-step reasoning protocol). Some
+    backends additionally produce a JSON wrapper. We accept either:
+        1. valid JSON object -> return as-is
+        2. anything else      -> wrap as {"reasoning": <text>}
+    """
+    text = (text or "").strip()
     if text.startswith("```"):
-        text = text.lstrip("`").lstrip("json").strip()
+        text = text.lstrip("`")
+        if text[:4].lower() == "json":
+            text = text[4:]
+        text = text.strip()
         if text.endswith("```"):
-            text = text[: -3].strip()
+            text = text[:-3].strip()
     try:
-        return json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise BackendError(f"VLM response was not valid JSON: {exc.msg}\n--\n{text[:300]}") from exc
+        payload = json.loads(text)
+        if isinstance(payload, dict):
+            return payload
+    except json.JSONDecodeError:
+        pass
+    return {"reasoning": text}
+
+
+def _normalize(payload: dict) -> dict:
+    """Coerce arbitrary VLM output into the dashboard's expected fields.
+
+    Always preserves the original under `raw` so the dashboard can display
+    the model's full response unchanged.
+    """
+    out: dict = {"raw": payload}
+
+    for k in DASHBOARD_FIELDS:
+        if k in payload:
+            out[k] = payload[k]
+
+    if "change_class" not in out:
+        forest_loss = _truthy(_dig(payload, "change_forest", "confidence"))
+        forest_gain = _truthy(_dig(payload, "change_non_forest", "afforestation_confidence"))
+        if forest_loss:
+            out["change_class"] = "deforestation"
+        elif forest_gain:
+            out["change_class"] = "afforestation"
+        else:
+            text = json.dumps(payload).lower()
+            for key in (
+                "deforestation", "afforestation", "fire_disturbance",
+                "stable_forest", "stable_non_forest", "ambiguous",
+            ):
+                if key in text:
+                    out["change_class"] = key
+                    break
+
+    if "reasoning" not in out:
+        out["reasoning"] = json.dumps(payload)[:600]
+
+    if "confidence" in out and isinstance(out["confidence"], str):
+        out["confidence"] = {"low": 0.3, "medium": 0.6, "high": 0.9}.get(
+            out["confidence"].lower(), 0.5
+        )
+
+    if "area_pct" not in out:
+        mag = _dig(payload, "change_forest", "measured_magnitude")
+        if isinstance(mag, (int, float)):
+            out["area_pct"] = max(0.0, min(100.0, float(mag) * 100.0))
+
+    try:
+        jsonschema.validate(out, JSON_SCHEMA)
+    except jsonschema.ValidationError as exc:
+        log.warning("Output did not match relaxed JSON_SCHEMA: %s", exc.message)
+    return out
+
+
+def _truthy(v) -> bool:
+    if isinstance(v, str):
+        return v.lower() in ("yes", "true", "high", "medium")
+    return bool(v)
+
+
+def _dig(d: dict, *keys):
+    cur = d
+    for k in keys:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(k)
+    return cur
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -109,7 +177,7 @@ def vllm_backend(
                     kwargs["response_format"] = response_format
                 rsp = client.chat.completions.create(**kwargs)
                 text = rsp.choices[0].message.content or ""
-                return _validate(_parse_response(text))
+                return _normalize(_parse_response(text))
             except Exception as exc:
                 log.warning("vLLM call with response_format=%s failed: %s", response_format, exc)
                 continue
@@ -136,13 +204,15 @@ def llamacpp_backend(
 
     def predict(panel_pngs: Sequence[bytes], metadata: dict) -> dict:
         messages = _build_messages(panel_pngs, metadata)
+        # The fine-tune was trained on free-form prose, not strict JSON. We
+        # don't constrain response_format here; if the user wants JSON-mode
+        # they can swap to vllm_backend with response_format json_object.
         rsp = client.chat.completions.create(
             model=model, messages=messages,
             temperature=temperature, max_tokens=max_tokens,
-            response_format={"type": "json_object"},
         )
         text = rsp.choices[0].message.content or ""
-        return _validate(_parse_response(text))
+        return _normalize(_parse_response(text))
 
     return predict
 
@@ -198,7 +268,7 @@ def transformers_backend(
         with torch.no_grad():
             out = model.generate(**inputs, max_new_tokens=max_new_tokens, temperature=0.2, do_sample=False)
         text = processor.batch_decode(out[:, inputs["input_ids"].shape[1]:], skip_special_tokens=True)[0]
-        return _validate(_parse_response(text))
+        return _normalize(_parse_response(text))
 
     return predict
 
