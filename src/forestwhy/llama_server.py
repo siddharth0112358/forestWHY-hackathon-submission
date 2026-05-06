@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 
 
 DEFAULT_GGUF_REPO = os.environ.get("GGUF_HF_REPO", "Siddharth63/LFM2.5-forestWHY-GGUF")
-DEFAULT_GGUF_QUANT = os.environ.get("GGUF_QUANT", "Q4_K_M")
+DEFAULT_GGUF_QUANT = os.environ.get("GGUF_QUANT", "Q8_0")
 DEFAULT_MMPROJ_FILE = os.environ.get(
     "GGUF_MMPROJ_FILENAME", "LFM2.5-forestWHY.BF16-mmproj.gguf"
 )

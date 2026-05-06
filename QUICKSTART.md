@@ -11,7 +11,7 @@ you have:
 | Mode | What runs | Hardware | Time-to-first-row |
 |---|---|---|---|
 | 1. **Stub smoke test** | JEPA panels + dummy VLM output | any laptop | ~30 s |
-| 2. **GGUF smoke test** | JEPA panels + real fine-tuned VLM (Q4_K_M GGUF) | any laptop | ~3 min first run, ~15 s after |
+| 2. **GGUF smoke test** | JEPA panels + real fine-tuned VLM (Q8_0 GGUF) | any laptop | ~4 min first run, ~20 s after |
 | 3. **Live SimSat run** | Full pipeline against simulated satellite + vLLM | local Docker + remote GPU | varies |
 
 Mode 2 is the **judge-friendly default**: it works on a Mac with no GPU,
@@ -47,7 +47,7 @@ cp .env.example .env
 The defaults already point at:
 - JEPA encoder → `Siddharth63/forestWHY-JEPA-vitl`
 - VLM (vLLM serving) → `Siddharth63/LFM2.5-forestWHY`
-- VLM (GGUF, Q4_K_M) → `Siddharth63/LFM2.5-forestWHY-GGUF`
+- VLM (GGUF, Q8_0 default) → `Siddharth63/LFM2.5-forestWHY-GGUF`
 
 ## Mode 1 — Stub smoke test (fastest)
 
@@ -69,9 +69,10 @@ Stop the dashboard with Ctrl+C in its terminal.
 ## Mode 2 — End-to-end with the real fine-tuned VLM (no GPU needed)
 
 Runs the same pipeline as Mode 1 but **calls the real LFM2.5-forestWHY** via
-a locally-launched `llama-server` on the GGUF weights. The Q4_K_M quant is
-731 MB; the BF16 mmproj projector is ~200 MB. First run downloads both;
-subsequent runs hit the HF cache.
+a locally-launched `llama-server` on the GGUF weights. The default Q8_0 quant
+is 1.25 GB (highest fidelity); the BF16 mmproj projector is ~200 MB. First
+run downloads both; subsequent runs hit the HF cache. Drop to `Q5_K_M`
+(843 MB) or `Q4_K_M` (731 MB) on lower-memory laptops.
 
 ```bash
 # One-time install
@@ -100,10 +101,11 @@ synthetic input the reasoning will note the noise / lack of land-cover
 features — that's correct. On real Sentinel-2 imagery from SimSat (Mode 3),
 it produces specific deforestation/fire/clearing analysis.
 
-**Override the quant** if you want a higher-quality but bigger weight:
+**Override the quant** if you want a smaller / faster weight:
 
 ```bash
-uv run python scripts/predict.py --smoke-test --with-gguf --gguf-quant Q8_0   # 1.25 GB
+uv run python scripts/predict.py --smoke-test --with-gguf --gguf-quant Q5_K_M   # 843 MB
+uv run python scripts/predict.py --smoke-test --with-gguf --gguf-quant Q4_K_M   # 731 MB
 ```
 
 ## Mode 3 — Live run against SimSat + a hosted vLLM
@@ -186,15 +188,22 @@ If you'd rather skip the GPU, the laptop GGUF backend works against live
 SimSat too:
 
 ```bash
-# Terminal A: launch llama-server manually
+# Terminal A: launch llama-server manually with Q8_0 (highest fidelity)
+GGUF_DIR=~/.cache/huggingface/hub/models--Siddharth63--LFM2.5-forestWHY-GGUF/snapshots/*
 llama-server \
-    -m ~/.cache/huggingface/hub/models--Siddharth63--LFM2.5-forestWHY-GGUF/snapshots/*/LFM2.5-forestWHY.Q4_K_M.gguf \
-    --mmproj ~/.cache/huggingface/hub/models--Siddharth63--LFM2.5-forestWHY-GGUF/snapshots/*/LFM2.5-forestWHY.BF16-mmproj.gguf \
-    --port 8080 --jinja -fa on
+    -m $GGUF_DIR/LFM2.5-forestWHY.Q8_0.gguf \
+    --mmproj $GGUF_DIR/LFM2.5-forestWHY.BF16-mmproj.gguf \
+    --port 8080 --jinja -fa on --ctx-size 8192 -ngl 99
+
+# (Lower-quant alternatives: replace Q8_0.gguf with Q5_K_M.gguf or Q4_K_M.gguf.)
 
 # Terminal B: predict.py against it
 uv run python scripts/predict.py --backend llamacpp --base-url http://localhost:8080/v1
 ```
+
+`-ngl 99` offloads all layers to Metal/CUDA (silently ignored on CPU-only
+builds). On Apple Silicon, Q8_0 inference on a 14-panel input takes about
+15–25 seconds per tile.
 
 ### 3e. Backfill historical tiles (optional, for the dashboard demo)
 

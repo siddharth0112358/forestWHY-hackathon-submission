@@ -178,10 +178,14 @@ def fetch_13band_at_with_walkback(
     stride_days: int = 14,
     timeout: float = 60.0,
     bands: Sequence[str] = SIMSAT_BANDS_AVAILABLE,
+    max_cloud_cover_pct: Optional[float] = 60.0,
 ) -> tuple[np.ndarray, dict]:
-    """Try the target timestamp; on failure, walk back in 14-day strides up to 90 days."""
+    """Try the target timestamp; on failure or excess cloud cover, walk back in
+    14-day strides up to 90 days. Pass max_cloud_cover_pct=None to disable
+    cloud filtering."""
     deltas = [0] + list(range(stride_days, max_walkback_days + 1, stride_days))
     last_exc: Optional[Exception] = None
+    cloudiest_seen: Optional[tuple[np.ndarray, dict]] = None
     for d in deltas:
         ts = (target_ts - timedelta(days=d)).strftime("%Y-%m-%dT%H:%M:%SZ")
         try:
@@ -189,12 +193,24 @@ def fetch_13band_at_with_walkback(
                 lon=lon, lat=lat, timestamp=ts,
                 size_km=size_km, base_url=base_url, timeout=timeout, bands=bands,
             )
-            if arr.size > 0 and meta.get("image_available", True):
-                meta["achieved_timestamp"] = ts
-                return arr, meta
+            if arr.size == 0 or not meta.get("image_available", True):
+                continue
+            cc = meta.get("cloud_cover")
+            meta["achieved_timestamp"] = ts
+            if max_cloud_cover_pct is not None and cc is not None and cc > max_cloud_cover_pct:
+                if cloudiest_seen is None or (cloudiest_seen[1].get("cloud_cover") or 100.0) > cc:
+                    cloudiest_seen = (arr, meta)
+                log.info("  walkback %+dd: cloud_cover=%.1f%% > %.0f%%, trying earlier",
+                         -d, cc, max_cloud_cover_pct)
+                continue
+            return arr, meta
         except (requests.HTTPError, requests.Timeout, RuntimeError) as exc:
             last_exc = exc
             continue
+    if cloudiest_seen is not None:
+        log.warning("  no clear tile within walkback window; returning least-cloudy "
+                    "(cloud_cover=%.1f%%)", cloudiest_seen[1].get("cloud_cover") or -1)
+        return cloudiest_seen
     raise RuntimeError(
         f"No Sentinel-2 coverage at lon={lon} lat={lat} within "
         f"{max_walkback_days} days of {target_ts.isoformat()}. Last error: {last_exc}"
