@@ -9,6 +9,9 @@
 
 ### Quick visual demo
 
+> 🎥 **Walkthrough video:** [Satellite Deforestation Demo — EU-Ready Evidence](assets/satellite_deforestation_demo_eu_ready_evidence.mp4)
+> *(end-to-end run of the dashboard against a Sentinel-2 pair, with the 10-step reasoning chain and EUDR-aligned report.)*
+
 > 14-panel temporal pair (Sentinel-2, 5 km tile, 2020 → 2024) →
 > LFM2.5-forestWHY 10-step reasoning → driver-attributed deforestation report.
 
