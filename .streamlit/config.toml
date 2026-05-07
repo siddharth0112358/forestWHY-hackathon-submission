@@ -1,0 +1,13 @@
+# Force dark theme so the dashboard's custom card / badge / reasoning
+# styling renders as designed. Override locally if you really want light mode,
+# but be aware the contrast will need re-tuning.
+[theme]
+base = "dark"
+primaryColor = "#4ec9b0"
+backgroundColor = "#0e1117"
+secondaryBackgroundColor = "#161a23"
+textColor = "#e6edf3"
+font = "sans serif"
+
+[browser]
+gatherUsageStats = false

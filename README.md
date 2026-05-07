@@ -3,8 +3,65 @@
 > Liquid AI hackathon **LFM track** submission. Built around SimSat
 > Sentinel-2 imagery, a Sentinel-2 I-JEPA encoder, and a fine-tuned
 > [`Siddharth63/LFM2.5-forestWHY`](https://huggingface.co/Siddharth63/LFM2.5-forestWHY)
-> trained on
-> [`Siddharth63/forestwhy-training-v1`](https://huggingface.co/datasets/Siddharth63/forestwhy-training-v1).
+> trained on the private curated set `Siddharth63/forestwhy-combined-v1`
+> and evaluated **out-of-distribution** against the public
+> [`Siddharth63/forestwhy-training-v2`](https://huggingface.co/datasets/Siddharth63/forestwhy-training-v2).
+
+### Quick visual demo
+
+> 14-panel temporal pair (Sentinel-2, 5 km tile, 2020 → 2024) →
+> LFM2.5-forestWHY 10-step reasoning → driver-attributed deforestation report.
+
+Top-5 hand-picked demos from a 10-location SimSat backfill (2020 → 2024).
+All five model-correct calls, ranked by area × class × confidence − cloud
+penalty.
+
+<table>
+  <tr>
+    <td align="center"><img src="assets/before_after_madagascar.gif" width="280" alt="Madagascar east 2020 vs 2024 — slash-and-burn (tavy) advancing through eastern rainforest"><br><sub><b>Madagascar east</b><br>tavy slash-and-burn · <b>high</b><br>~90 % area · cloud 2/3 %</sub></td>
+    <td align="center"><img src="assets/before_after_congo.gif" width="280" alt="Congo Equateur 2020 vs 2024 — shifting cultivation belt expanding"><br><sub><b>Congo Equateur</b><br>shifting cultivation · <b>high</b><br>~90 % area</sub></td>
+    <td align="center"><img src="assets/before_after_rondonia.gif" width="280" alt="Rondônia 2020 vs 2024 — fishbone settlement pattern in the Amazon"><br><sub><b>Rondônia, Brazil</b><br>fishbone settlement · <b>medium</b><br>~45 % area · cloud 0/0 %</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="assets/before_after_sumatra.gif" width="280" alt="Sumatra Riau 2020 vs 2024 — peatland drainage and pulp plantations"><br><sub><b>Sumatra Riau</b><br>peatland pulp plantations · <b>low</b><br>~65 % area</sub></td>
+    <td align="center"><img src="assets/before_after_kalimantan.gif" width="280" alt="Central Kalimantan 2020 vs 2024 — oil-palm conversion"><br><sub><b>Central Kalimantan</b><br>oil-palm plantation · <b>high</b><br>~65 % area</sub></td>
+    <td align="center" valign="middle"><sub>↻ Reproduce all five with<br><code>uv run python scripts/demo_backfill.py</code><br><code>uv run python scripts/make_demo_gifs.py</code><br>≈ 7 min on Apple Silicon Metal.</sub></td>
+  </tr>
+</table>
+
+<p align="center">
+  <img src="assets/dashboard_overview.png" width="940" alt="forestWHY dashboard — Madagascar east, deforestation, severity high, 90% area, slash-and-burn driver"><br>
+  <sub>Dashboard inspector on a Madagascar east tile — model says <b>deforestation</b>,
+  severity <b>high</b>, ~90 % area affected, driver <code>agricultural_clearing</code>.
+  All 14 panels (8 spectral + 6 JEPA differentials) plus the 10-step
+  reasoning chain are visible in one view.</sub>
+</p>
+
+<p align="center">
+  <img src="assets/dashboard_deforestation_low.png" width="460" alt="forestWHY dashboard — a lower-severity deforestation prediction"> &nbsp;
+  <img src="assets/dashboard_stable_forest.png"      width="460" alt="forestWHY dashboard — Yasuní/Manu protected primary forest, stable_forest"><br>
+  <sub>The same inspector on two contrasting tiles —
+  <b>left:</b> a low-severity deforestation case (~35 % area, model still confident);
+  <b>right:</b> a stable-forest contrast from a protected primary-forest area
+  (the model correctly says no change). The badge palette and metric cards
+  let a judge tell at a glance which class the model picked.</sub>
+</p>
+
+### Why this matters now
+
+The **EU Deforestation Regulation (EUDR)** comes into force on
+**30 December 2025** for large operators — every shipment of soy, palm
+oil, beef, cocoa, coffee, rubber, or wood entering the EU must come with a
+plot-level due-diligence statement showing the land was not deforested
+after Dec 2020. Non-compliance fines: up to 4 % of EU turnover.
+At the same time, the voluntary carbon market took **$1–2 B in
+mark-downs** during 2023–24 over verification failures (Verra REDD+
+re-baselines, Pachama buffer-pool reversals). Both buyers — compliance
+officers and carbon verifiers — need **driver-attributed, audit-ready,
+plot-scale alerts** at a price below the €0.50–2/ha/year incumbents
+charge. forestWHY is the reasoning layer that produces those alerts.
+
+### What it does
 
 forestWHY does what a single-frame remote-sensing model can't: it **reasons
 over a temporal pair** of Sentinel-2 acquisitions and tells you not only
@@ -53,7 +110,9 @@ for the customer/product story.
 | Sentinel-2 I-JEPA ViT-L/8 encoder (1.21 GB) | https://huggingface.co/Siddharth63/forestWHY-JEPA-vitl                                           |
 | Fine-tuned VLM (full precision)         | https://huggingface.co/Siddharth63/LFM2.5-forestWHY                                                   |
 | Fine-tuned VLM (GGUF Q4_K_M / Q5_K_M / Q8_0) | https://huggingface.co/Siddharth63/LFM2.5-forestWHY-GGUF                                         |
-| Training dataset (≈ 150 K Sentinel-2 pairs) | https://huggingface.co/datasets/Siddharth63/forestwhy-training-v1                                |
+| Training dataset (private, curated) | `Siddharth63/forestwhy-combined-v1` (private — gated access)                                              |
+| Public eval dataset (≈ 150 K Sentinel-2 pairs) | https://huggingface.co/datasets/Siddharth63/forestwhy-training-v2                                |
+| Base for comparison (1.6B params)       | https://huggingface.co/LiquidAI/LFM2.5-VL-1.6B                                                        |
 
 ## Repository layout
 
@@ -129,6 +188,11 @@ Pick the fidelity that matches your environment:
 
 See [QUICKSTART.md](QUICKSTART.md) for full instructions, troubleshooting,
 and the smoke-test checklist.
+
+## Contact
+
+Built by **Siddharth** — siddharth.deshpande63@gmail.com
+Happy to walk through any of this; ping me directly for follow-up.
 
 ## License & credits
 

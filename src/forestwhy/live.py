@@ -178,11 +178,12 @@ def fetch_13band_at_with_walkback(
     stride_days: int = 14,
     timeout: float = 60.0,
     bands: Sequence[str] = SIMSAT_BANDS_AVAILABLE,
-    max_cloud_cover_pct: Optional[float] = 60.0,
+    max_cloud_cover_pct: Optional[float] = 50.0,
 ) -> tuple[np.ndarray, dict]:
     """Try the target timestamp; on failure or excess cloud cover, walk back in
     14-day strides up to 90 days. Pass max_cloud_cover_pct=None to disable
-    cloud filtering."""
+    cloud filtering. Default 50 % cloud-cover ceiling — tighter than the
+    Sentinel-2 native 60 % default to keep JEPA panels usable."""
     deltas = [0] + list(range(stride_days, max_walkback_days + 1, stride_days))
     last_exc: Optional[Exception] = None
     cloudiest_seen: Optional[tuple[np.ndarray, dict]] = None

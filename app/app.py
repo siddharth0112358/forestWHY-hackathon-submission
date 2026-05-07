@@ -14,11 +14,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import folium
 import pandas as pd
 import pydeck as pdk
 import requests
 import streamlit as st
 from dotenv import load_dotenv
+from streamlit_folium import st_folium
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -45,7 +47,14 @@ st.markdown("""
   --fw-accent:         #4ec9b0;
 }
 
-.block-container { padding-top: 2rem; padding-bottom: 3rem; max-width: 1500px; }
+/* Let Streamlit size the container naturally — fixed max-width breaks at high
+   browser zoom levels (sidebar takes its width, main area pushed off-screen).
+   Allow horizontal scroll on the body as a final safety net. */
+.block-container { padding-top: 2rem; padding-bottom: 3rem; }
+html, body { overflow-x: auto; }
+.main, .stApp { min-width: 0; }
+[data-testid="stVerticalBlock"] { min-width: 0; }
+[data-testid="stHorizontalBlock"] { min-width: 0; flex-wrap: wrap; }
 
 /* Title */
 h1 { font-weight: 700 !important; letter-spacing: -0.5px; }
@@ -320,8 +329,61 @@ with st.sidebar:
             "**llama-server** (laptop) → see `QUICKSTART.md` §3d."
         )
 
+    # Radio is OUTSIDE the form so the conditional UI updates on click.
+    # (Streamlit forms batch all widget changes until submit — radio inside
+    #  a form would never reveal the lat/lon inputs.)
+    mode = st.radio(
+        "Location",
+        ["Named hotspot", "Custom lat/lon"],
+        horizontal=True,
+        key="loc_mode",
+    )
+
+    # In Custom-lat/lon mode, the user picks coordinates by clicking the
+    # folium picker (or by typing). The picker has to live OUTSIDE the form,
+    # because folium's click → rerun → number_input update flow doesn't
+    # work inside Streamlit forms.
+    if mode == "Custom lat/lon":
+        st.caption("Click the map below to drop a pin, or type coordinates.")
+        if "picker_lat" not in st.session_state:
+            st.session_state.picker_lat = -9.1
+            st.session_state.picker_lon = -68.4
+
+        _picker_map = folium.Map(
+            location=[st.session_state.picker_lat, st.session_state.picker_lon],
+            zoom_start=2,
+            tiles="cartodbpositron",
+        )
+        folium.Marker(
+            [st.session_state.picker_lat, st.session_state.picker_lon],
+            tooltip=f"({st.session_state.picker_lon:.3f}, {st.session_state.picker_lat:.3f})",
+            icon=folium.Icon(color="red", icon="crosshairs", prefix="fa"),
+        ).add_to(_picker_map)
+        # Optional: show the 18 watched hotspots as small grey dots so the user
+        # has reference geography.
+        for _h in LOCATIONS:
+            folium.CircleMarker(
+                [_h.lat, _h.lon], radius=3,
+                color="#7aa57a", fill=True, fill_opacity=0.7, weight=1,
+                tooltip=_h.id,
+            ).add_to(_picker_map)
+        _click = st_folium(
+            _picker_map,
+            height=260,
+            width=None,
+            returned_objects=["last_clicked"],
+            key="custom_picker",
+        )
+        if _click and _click.get("last_clicked"):
+            new_lat = float(_click["last_clicked"]["lat"])
+            new_lon = float(_click["last_clicked"]["lng"])
+            if (abs(new_lat - st.session_state.picker_lat) > 1e-6
+                    or abs(new_lon - st.session_state.picker_lon) > 1e-6):
+                st.session_state.picker_lat = new_lat
+                st.session_state.picker_lon = new_lon
+                st.rerun()
+
     with st.form("run_inference", clear_on_submit=False):
-        mode = st.radio("Location", ["Named hotspot", "Custom lat/lon"], horizontal=True)
         if mode == "Named hotspot":
             loc_id = st.selectbox("Hotspot", list(LOCATIONS_BY_ID))
             _loc = LOCATIONS_BY_ID[loc_id]
@@ -331,9 +393,21 @@ with st.sidebar:
             st.caption(f"{_loc.country} · {_loc.biome} · ({_loc.lon:.4f}, {_loc.lat:.4f})")
         else:
             c1, c2 = st.columns(2)
-            in_lon = c1.number_input("Longitude", value=-68.4, min_value=-180.0, max_value=180.0, format="%.4f")
-            in_lat = c2.number_input("Latitude",  value=-9.1,  min_value=-90.0,  max_value=90.0,  format="%.4f")
-            in_region = st.text_input("Region label", value=f"custom_{in_lon:.2f}_{in_lat:.2f}")
+            in_lon = c1.number_input(
+                "Longitude", value=float(st.session_state.picker_lon),
+                min_value=-180.0, max_value=180.0, format="%.4f",
+                key="custom_lon",
+            )
+            in_lat = c2.number_input(
+                "Latitude", value=float(st.session_state.picker_lat),
+                min_value=-90.0, max_value=90.0, format="%.4f",
+                key="custom_lat",
+            )
+            in_region = st.text_input(
+                "Region label",
+                value=f"custom_{in_lon:.2f}_{in_lat:.2f}",
+                key="custom_region",
+            )
             in_biome = "custom"
             in_country = "custom"
 
@@ -341,7 +415,7 @@ with st.sidebar:
         year_before = c1.number_input("Before year", min_value=2017, max_value=2026, value=2020, step=1)
         year_after  = c2.number_input("After year",  min_value=2017, max_value=2026, value=2024, step=1)
         size_km = st.slider("Tile size (km)", 1.0, 10.0, 5.0, 0.5)
-        max_cc  = st.slider("Max cloud cover (%) for walkback", 0, 100, 60, 5)
+        max_cc  = st.slider("Max cloud cover (%) for walkback", 0, 100, 50, 5)
 
         submitted = st.form_submit_button(
             "🛰️  Run inference",
@@ -418,39 +492,76 @@ hotspot_df = pd.DataFrame([{
 } for loc in LOCATIONS])
 
 layers = [
+    # Watched hotspots — outlined ring, always visible at any zoom.
     pdk.Layer(
         "ScatterplotLayer", data=hotspot_df,
-        get_position=["lon", "lat"], get_radius=80_000,
-        get_fill_color=[120, 200, 120, 80], pickable=True,
+        get_position=["lon", "lat"],
+        get_radius=80_000,
+        radius_units="meters",
+        radius_min_pixels=7,
+        radius_max_pixels=18,
+        get_fill_color=[120, 200, 120, 90],
+        get_line_color=[60, 180, 90, 240],
+        line_width_min_pixels=2,
+        stroked=True,
+        filled=True,
+        pickable=True,
     ),
 ]
 
 if not filtered.empty:
     color_map = {
-        "deforestation":     [220, 50, 47, 200],
-        "fire_disturbance":  [203, 75, 22, 200],
-        "afforestation":     [133, 153, 0, 200],
-        "stable_forest":     [38, 139, 210, 200],
-        "stable_non_forest": [101, 123, 131, 180],
-        "ambiguous":         [181, 137, 0, 200],
+        "deforestation":     [220, 50, 47, 230],
+        "fire_disturbance":  [203, 75, 22, 230],
+        "afforestation":     [133, 153, 0, 230],
+        "stable_forest":     [38, 139, 210, 230],
+        "stable_non_forest": [101, 123, 131, 220],
+        "ambiguous":         [181, 137, 0, 230],
     }
     plot_df = filtered.copy()
     plot_df["color"] = plot_df["change_class"].map(
-        lambda c: color_map.get(c, [100, 100, 100, 180])
+        lambda c: color_map.get(c, [100, 100, 100, 200])
     )
     layers.append(
         pdk.Layer(
             "ScatterplotLayer", data=plot_df,
-            get_position=["lon", "lat"], get_radius=30_000,
-            get_fill_color="color", pickable=True,
+            get_position=["lon", "lat"],
+            get_radius=30_000,
+            radius_units="meters",
+            radius_min_pixels=8,
+            radius_max_pixels=18,
+            get_fill_color="color",
+            get_line_color=[255, 255, 255, 200],
+            line_width_min_pixels=1.5,
+            stroked=True,
+            filled=True,
+            pickable=True,
         )
     )
 
-st.pydeck_chart(pdk.Deck(
-    initial_view_state=pdk.ViewState(latitude=0, longitude=-30, zoom=1.2),
-    layers=layers, map_style=None,
-    tooltip={"text": "{id}\n{change_class} ({severity})\nconfidence={confidence}"},
-))
+# Constrain interaction so the world doesn't pan into multiple wrapped copies.
+# Allow zoom (scroll/pinch) but NOT drag-pan, and lock pitch/bearing.
+_view = pdk.View(
+    type="MapView",
+    controller={"dragPan": False, "doubleClickZoom": False,
+                "scrollZoom": True, "touchZoom": True,
+                "dragRotate": False, "keyboard": False},
+)
+
+st.pydeck_chart(
+    pdk.Deck(
+        views=[_view],
+        initial_view_state=pdk.ViewState(
+            latitude=10, longitude=20, zoom=1.4,
+            pitch=0, bearing=0, max_zoom=8, min_zoom=1.4,
+        ),
+        layers=layers,
+        # CARTO Voyager: colourful land tones + soft blue oceans, no Mapbox token required.
+        map_style="https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json",
+        tooltip={"text": "{id}\n{change_class} ({severity})\nconfidence={confidence}"},
+    ),
+    height=620,   # ~2:1 aspect for typical viewport — one world copy fits.
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Predictions table + detail view
@@ -472,14 +583,28 @@ table_cols = [
     "source", "model",
 ]
 present = [c for c in table_cols if c in filtered.columns]
-st.dataframe(filtered[present], use_container_width=True, height=300)
+table_df = filtered[present].reset_index(drop=True)
 
-selected = st.selectbox(
-    "Inspect prediction id",
-    options=filtered["id"].tolist(),
-    format_func=lambda i: f"#{i}  ·  {filtered.loc[filtered['id'] == i, 'region_id'].iloc[0]}  "
-                          f"·  {filtered.loc[filtered['id'] == i, 'change_class'].iloc[0] or '—'}",
+st.caption("Click a row to inspect the model's reasoning + 14 panels for that prediction.")
+table_event = st.dataframe(
+    table_df,
+    use_container_width=True,
+    height=320,
+    on_select="rerun",
+    selection_mode="single-row",
+    hide_index=True,
+    key="predictions_table",
 )
+
+# Resolve selected row → DB id, defaulting to the most recent (top) row.
+_selected_rows = []
+if table_event is not None and hasattr(table_event, "selection"):
+    _selected_rows = list(getattr(table_event.selection, "rows", []) or [])
+
+if _selected_rows:
+    selected = int(table_df.iloc[_selected_rows[0]]["id"])
+else:
+    selected = int(table_df.iloc[0]["id"])
 
 row = filtered.loc[filtered["id"] == selected].iloc[0]
 
@@ -490,6 +615,18 @@ row = filtered.loc[filtered["id"] == selected].iloc[0]
 
 import html as _html
 
+def _safe_str(v, default: str = "") -> str:
+    """Return v as a string, treating None / NaN / 'None' / 'nan' as the default."""
+    if v is None:
+        return default
+    if isinstance(v, float) and pd.isna(v):
+        return default
+    s = str(v).strip()
+    if s.lower() in ("none", "nan", ""):
+        return default
+    return s
+
+
 def _fmt_cc(v) -> str:
     return f"{float(v):.1f}%" if pd.notna(v) else "n/a"
 
@@ -498,13 +635,13 @@ def _badge(label: str, css_class: str) -> str:
     return f'<span class="fw-badge {css_class}">{_html.escape(str(label))}</span>'
 
 
-cls = row["change_class"] or ""
-sev = row["severity"] or "none"
-drv = row["driver_hypothesis"]
+cls = _safe_str(row["change_class"])
+sev = _safe_str(row["severity"], "none")
+drv = _safe_str(row["driver_hypothesis"])
 
 badges = [_badge((cls or "—").replace("_", " "), f"fw-cls-{cls}")]
 badges.append(_badge(f"{sev} severity", f"fw-sev-{sev}"))
-if drv and drv not in ("None", "unknown"):
+if drv and drv != "unknown":
     badges.append(_badge(drv.replace("_", " "), "fw-driver fw-badge"))
 
 hero = f"""
@@ -526,8 +663,8 @@ st.markdown(hero, unsafe_allow_html=True)
 
 # Quick metrics row
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("Change class", (row["change_class"] or "—").replace("_", " "))
-m2.metric("Severity",     (row["severity"] or "—").title())
+m1.metric("Change class", _safe_str(row["change_class"], "—").replace("_", " "))
+m2.metric("Severity",     _safe_str(row["severity"], "—").title())
 m3.metric("Area affected", f"{row['area_pct']:.1f}%" if pd.notna(row.get("area_pct")) else "—")
 m4.metric("Confidence",
           f"{row['confidence']:.2f}" if pd.notna(row["confidence"]) else "—")
@@ -608,12 +745,3 @@ if row.get("reasoning"):
 
 if row.get("cloud_cover_note"):
     st.caption(f"☁️  Cloud-cover note from model: {row['cloud_cover_note']}")
-
-
-with st.expander("Raw VLM JSON (audit trail)"):
-    raw = row.get("raw_response")
-    if raw:
-        try:
-            st.json(json.loads(raw))
-        except Exception:
-            st.code(raw)

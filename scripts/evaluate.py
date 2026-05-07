@@ -82,7 +82,25 @@ V2_IMAGE_KEYS: dict[str, str] = {
     "pca_semantic":       "img_pca_semantic",
 }
 
-DEFORESTATION_CLASS = "deforestation"
+# v2 dataset label vocabulary (different from the model's emitted classes):
+#   active_front_anthropogenic  ~46% — this is the deforestation class
+#   recovery_or_afforestation
+#   stable_forest_intact
+#   non_forest_negative
+#   stable_forest_managed
+#   fire_or_disturbance
+TRUTH_DEFORESTATION_LABEL = "active_front_anthropogenic"
+
+# Model's emitted change_class is mapped onto the v2 truth label space here, so
+# accuracy is measured on the same vocabulary.
+PRED_TO_TRUTH_LABEL: dict[str, str] = {
+    "deforestation":     "active_front_anthropogenic",
+    "fire_disturbance":  "fire_or_disturbance",
+    "afforestation":     "recovery_or_afforestation",
+    "stable_forest":     "stable_forest_intact",
+    "stable_non_forest": "non_forest_negative",
+    "ambiguous":         "ambiguous",
+}
 
 
 def _row_to_panels(row: dict) -> list[bytes]:
@@ -129,7 +147,7 @@ def _row_truth(row: dict) -> dict:
         "severity":          row.get("change_magnitude"),
         "area_pct":          row.get("affected_area_percent"),
         "driver_hypothesis": _coerce_driver(row),
-        "deforestation":     row.get("label") == DEFORESTATION_CLASS,
+        "deforestation":     row.get("label") == TRUTH_DEFORESTATION_LABEL,
         "reasoning":         row.get("assistant_text", ""),
     }
 
@@ -171,26 +189,36 @@ def _coerce_driver(row: dict) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _balanced_sample(repo: str, split: str, n_per_class: int, seed: int = 42) -> list[dict]:
-    """Pull n_per_class rows for `deforestation` and n_per_class rows for the
-    rest (combined into a single 'no_deforestation' bucket). Streams the dataset
-    so we don't materialise 150k rows."""
+    """Pull n_per_class rows of `deforestation` and n_per_class rows of the rest.
+
+    Iterates the dataset sequentially without shuffle (`.shuffle(buffer_size=...)`
+    on a streaming dataset triggers repeated re-downloads of the same parquet
+    shard on some HF storage backends). The dataset is heterogeneous enough
+    that any contiguous window contains both classes.
+    """
     from datasets import load_dataset
-    ds = load_dataset(repo, split=split, streaming=True).shuffle(seed=seed, buffer_size=10_000)
+    ds = load_dataset(repo, split=split, streaming=True)
     deforestation: list[dict] = []
     other: list[dict] = []
     target = n_per_class
+    seen = 0
     for row in ds:
+        seen += 1
         label = row.get("label")
-        if label == DEFORESTATION_CLASS and len(deforestation) < target:
+        if label == TRUTH_DEFORESTATION_LABEL and len(deforestation) < target:
             deforestation.append(row)
-        elif label is not None and label != DEFORESTATION_CLASS and len(other) < target:
+        elif label is not None and label != TRUTH_DEFORESTATION_LABEL and len(other) < target:
             other.append(row)
         if len(deforestation) >= target and len(other) >= target:
             break
+        if seen % 200 == 0:
+            log.info("  scanned %d rows (deforestation=%d/%d, other=%d/%d)",
+                     seen, len(deforestation), target, len(other), target)
     rng = random.Random(seed)
     out = deforestation + other
     rng.shuffle(out)
-    log.info("Sampled %d deforestation + %d other = %d total", len(deforestation), len(other), len(out))
+    log.info("Sampled %d deforestation + %d other = %d total (scanned %d rows)",
+             len(deforestation), len(other), len(out), seen)
     return out
 
 
@@ -216,7 +244,14 @@ def _binary_deforestation_pred(pred: dict) -> bool | None:
     cc = pred.get("change_class")
     if cc is None:
         return None
-    return cc == DEFORESTATION_CLASS
+    return cc == "deforestation"
+
+
+def _mapped_change_class(pred: dict) -> Optional[str]:
+    cc = pred.get("change_class")
+    if cc is None:
+        return None
+    return PRED_TO_TRUTH_LABEL.get(cc, cc)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -296,6 +331,7 @@ def main() -> None:
     log.info("Writing results to %s", out_dir)
 
     records: list[dict] = []
+    incremental_path = out_dir / "results_partial.json"
     for i, row in enumerate(samples):
         log.info("[%d/%d] label=%s region=%s",
                  i + 1, len(samples), row.get("label"), row.get("region"))
@@ -330,6 +366,14 @@ def main() -> None:
             "finetuned": fine_pred,
         })
 
+        # Incremental write so partial runs survive process kills / hangs.
+        try:
+            incremental_path.write_text(
+                json.dumps({"samples": records}, indent=2, default=str)
+            )
+        except Exception as exc:
+            log.warning("  incremental write failed: %s", exc)
+
     # ------------------- aggregate --------------------------------------------
     truths = [r["truth"] for r in records]
 
@@ -343,15 +387,16 @@ def main() -> None:
     }
 
     metrics_rows = [
-        ("change_class accuracy",      "change_class",
-         lambda side: _accuracy(col(side, "change_class"), [t["change_class"] for t in truths])),
+        ("change_class accuracy (mapped)", "change_class",
+         lambda side: _accuracy(
+             [_mapped_change_class(r[side]) if isinstance(r[side], dict) else None
+              for r in records],
+             [t["change_class"] for t in truths])),
         ("binary deforestation acc.",  "deforestation",
          lambda side: _accuracy(
-             [_binary_deforestation_pred(p) if isinstance(p, dict) else None
-              for p in (col(side, "change_class") if False else [r[side] for r in records])],
+             [_binary_deforestation_pred(r[side]) if isinstance(r[side], dict) else None
+              for r in records],
              [t["deforestation"] for t in truths])),
-        ("severity accuracy",          "severity",
-         lambda side: _accuracy(col(side, "severity"), [t["severity"] for t in truths])),
         ("driver accuracy",            "driver_hypothesis",
          lambda side: _accuracy(col(side, "driver_hypothesis"),
                                 [t["driver_hypothesis"] for t in truths])),
