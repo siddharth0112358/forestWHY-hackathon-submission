@@ -6,6 +6,11 @@
 > trained on the private curated set `Siddharth63/forestwhy-combined-v1`
 > and evaluated **out-of-distribution** against the public
 > [`Siddharth63/forestwhy-training-v2`](https://huggingface.co/datasets/Siddharth63/forestwhy-training-v2).
+>
+> **Headline result:** **69.4 %** binary deforestation accuracy on the
+> held-out OOD eval set, versus ~50 % for the stock LFM2.5-VL-1.6B base
+> (random on a balanced split). See [ARCHITECTURE.md § Evaluation methodology](ARCHITECTURE.md#evaluation-methodology)
+> for methodology and per-class numbers.
 
 ### Quick visual demo
 
@@ -117,6 +122,9 @@ for the customer/product story.
 | Training dataset (private, curated) | `Siddharth63/forestwhy-combined-v1` (private — gated access)                                              |
 | Public eval dataset (≈ 150 K Sentinel-2 pairs) | https://huggingface.co/datasets/Siddharth63/forestwhy-training-v2                                |
 | Base for comparison (1.6B params)       | https://huggingface.co/LiquidAI/LFM2.5-VL-1.6B                                                        |
+| Training script (Unsloth + LoRA r=32)   | [`scripts/finetune_lfm2vl.py`](scripts/finetune_lfm2vl.py)                                            |
+| Adapter merge + HF push helper          | [`scripts/merge_lora_and_push.py`](scripts/merge_lora_and_push.py)                                    |
+| Full-finetune Modal config (alternate)  | [`configs/forestwhy_finetune_modal.yaml`](configs/forestwhy_finetune_modal.yaml)                      |
 
 ## Repository layout
 
@@ -145,6 +153,8 @@ for the customer/product story.
 │   ├── evaluate.py / rescore_results.py / audit_misclassifications.py
 │   ├── make_demo_gifs.py              #   build the README's hero GIFs from db_images/
 │   ├── refresh_predictions.py / reinfer_existing.py
+│   ├── finetune_lfm2vl.py             #   training script that produced the published weights
+│   ├── merge_lora_and_push.py         #   merge LoRA + push to HF Hub
 │   └── download_weights.py / upload_jepa.py / quantize.py / push_gguf_to_hf.py
 │
 └── src/forestwhy/                     # importable library (uv sync installs as a package)
