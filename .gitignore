@@ -35,5 +35,6 @@ samples/
 # streamlit
 .streamlit/secrets.toml
 
-# private demo notes (kept local; not for the public submission)
+# private demo notes + form answers (kept local; not for the public submission)
 DEMO_SCRIPT.md
+SUBMISSION_ANSWERS.md

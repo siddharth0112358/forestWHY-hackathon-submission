@@ -149,6 +149,71 @@ collapses on the 14-panel input — see the headline numbers below for the
 exact gap. The fine-tune learns the 14-panel dialect, and that's where the
 binary-deforestation accuracy jump comes from.
 
+### vs. a CNN classifier on the JEPA embeddings (no VLM at all)
+
+The most natural baseline a remote-sensing engineer would propose: skip the
+LFM2.5-VL entirely, take the (8, 1024) patch embeddings the JEPA encoder
+already produces, and slap a small CNN or MLP head on top to classify
+change_class directly. That's a 5-MB model that fits anywhere.
+
+The reason this won't replace forestWHY is *what comes out the other side*.
+A CNN head emits a distribution over six classes; that's it. Compliance
+buyers and carbon-credit verifiers don't pay for a softmax — they pay for
+**driver attribution AND a human-readable rationale they can audit**.
+
+The 10-step reasoning chain the VLM produces — *spectral baseline →
+spectral quantification → structure analysis → JEPA semantic change →
+JEPA spatial structure → JEPA change dynamics → JEPA semantic clusters →
+driver synthesis → regional context → forecast* — is the artefact the
+downstream user actually consumes. Each step cites specific panel
+numbers, quantitative ΔNDVI/ΔNBR magnitudes, and JEPA evidence. A
+compliance officer can paste it into a due-diligence statement; a
+prosecutor can read it before signing a citation; a carbon-credit
+auditor can use it as the per-plot rationale in a verification report.
+**No CNN head produces text, and the text is what the buyer is paying
+for.** The structured JSON is just the index — the prose is the
+record.
+
+- The driver field (`agricultural_clearing` / `logging_road` / `mining` /
+  `fire` / `plantation` / …) is what an EUDR due-diligence statement
+  actually requires; it determines which supply-chain owner is liable. A
+  CNN head can be trained for it, but each new driver class is a separate
+  fine-tune cycle on freshly labelled data.
+- The 10-step prose rationale is the artefact a credit committee or
+  prosecutor pastes into the case file. *That* is what we measured at
+  58.6 % out-of-distribution driver accuracy with synonym extraction —
+  numbers no contrastive head produces because contrastive heads don't
+  produce text.
+- Generalising to a new biome with a CNN head means relabelling and
+  retraining; with the VLM, you re-fine-tune on a few hundred examples
+  with the new driver vocabulary in the prompt. The **few-shot
+  generalisation surface** is much wider.
+
+So forestWHY is not "VLM because it's fashionable" — the VLM is
+load-bearing for the part of the alert that pays the bill.
+
+### vs. a stock LFM2.5-VL on the same panels (no fine-tune)
+
+The other obvious baseline: just prompt the base `LiquidAI/LFM2.5-VL-1.6B`
+with the 14 panels and the same prompt template. That's the natural "do
+nothing special" comparison.
+
+We measured this directly, on 50 balanced samples from
+`forestwhy-training-v2`:
+
+| Metric | Stock 1.6B | forestwhy fine-tune | Δ |
+|---|---|---|---|
+| Binary deforestation accuracy | 0.500 (random) | 0.694 | **+0.194** |
+| Driver accuracy | 0.062 | 0.586 | **+0.524** |
+| Change-class accuracy (mapped) | 0.219 | 0.367 | **+0.149** |
+
+The stock 1.6B scores literally random on the binary headline question,
+because it has never seen the 14-panel input distribution. Spectral indices
+encoded as pseudo-RGB and JEPA differentials are out-of-domain compared to
+its photographic pretraining. The fine-tune is what teaches it the
+14-panel dialect. **Without the fine-tune, you have a chatbot looking at
+satellite imagery; with it, you have an analyst.**
+
 ### vs. supervised contrastive change-detection models (e.g. SatMAE, DOFA)
 
 Contrastive change-detection models predict a binary or multi-class

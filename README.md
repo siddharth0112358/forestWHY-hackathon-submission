@@ -80,12 +80,13 @@ tile) and turns it into 14 input panels for a vision-language model:
 
 Spectral alone is fooled by all the things spectral indices have always
 been fooled by. JEPA differentials alone tell you *something* changed but
-not *what*. Together — fed to **LFM2.5-forestWHY**, a 2 B fine-tune of
-LFM2-VL trained on 150 K labelled Sentinel-2 pairs — the model can read
-both kinds of evidence in one pass and produce a structured deforestation
-report with a 10-step reasoning chain. That report is small enough (≈ 1 KB)
-to ship as JSON, opening the door to on-orbit inference where the raw
-imagery would never be downlinked.
+not *what*. Together — fed to **LFM2.5-forestWHY**, a 1.6 B-parameter
+fine-tune of LFM2.5-VL trained on the private curated set
+`Siddharth63/forestwhy-combined-v1` — the model can read both kinds of
+evidence in one pass and produce a structured deforestation report with a
+10-step reasoning chain. That report is small enough (≈ 1 KB) to ship as
+JSON, opening the door to on-orbit inference where the raw imagery would
+never be downlinked.
 
 This is a workflow that neither satellite imagery alone (no temporal
 reasoning, no driver attribution) nor a generic VLM alone (can't read
@@ -135,31 +136,23 @@ for the customer/product story.
 ├── configs/
 │   └── forestwhy_finetune_modal.yaml  # leap-finetune Modal H100 config
 │
-├── scripts/
-│   ├── predict.py                     # main watch loop (--smoke-test or live SimSat)
-│   ├── backfill.py                    # historical (location, before, after) iteration
-│   ├── download_weights.py            # pre-warm HF cache (JEPA + VLM)
-│   ├── upload_jepa.py                 # one-off: push the encoder .pt to HF Hub
-│   ├── generate_samples.py            # eval-set labeller (uses Anthropic for ground truth)
-│   ├── check_samples.py               # validate generated samples conform to schema
-│   ├── evaluate.py                    # base vs fine-tuned per-field accuracy
-│   ├── prepare_dataset.py             # HF dataset → leap-finetune JSONL
-│   ├── quantize.py                    # safetensors → GGUF Q4_K_M / Q8_0 + mmproj
-│   └── push_gguf_to_hf.py             # upload GGUF pair to HF Hub
+├── scripts/                           # CLI entry points — see "What's in each top-level directory" below
+│   ├── predict.py                     #   the live watch loop (judges' main entry)
+│   ├── backfill.py / demo_backfill.py #   batch historical scoring + curated demo set
+│   ├── evaluate.py / rescore_results.py / audit_misclassifications.py
+│   ├── make_demo_gifs.py              #   build the README's hero GIFs from db_images/
+│   ├── refresh_predictions.py / reinfer_existing.py
+│   └── download_weights.py / upload_jepa.py / quantize.py / push_gguf_to_hf.py
 │
-└── src/forestwhy/
-    ├── __init__.py
-    ├── db.py                          # SQLite schema + insert/fetch helpers
-    ├── live.py                        # SimSat HTTP client (position, 13-band, walkback)
-    ├── locations.py                   # 18 watched deforestation hotspots
-    ├── regions.py                     # tile geometry (haversine, find_tile)
-    ├── spectral.py                    # 8 spectral panel generators
+└── src/forestwhy/                     # importable library (uv sync installs as a package)
     ├── jepa.py                        # vendored S2Encoder + 6 JEPA panels + HF auto-download
-    ├── llama_server.py                # subprocess lifecycle for llama-server + GGUF auto-pull
+    ├── live.py                        # SimSat HTTP client + cloud-cover walkback
     ├── pipeline.py                    # tile → 14 panels → VLM → SQLite glue
+    ├── evaluator.py                   # PredictFn + vllm/llamacpp/transformers/stub backends
     ├── prompts.py                     # SYSTEM_PROMPT (training-time verbatim) + dashboard schema
-    ├── annotator.py                   # (planned) Anthropic ground-truth labeller helpers
-    └── evaluator.py                   # PredictFn protocol + vllm/llamacpp/transformers/stub backends
+    ├── llama_server.py                # subprocess lifecycle for llama-server + GGUF auto-pull
+    ├── spectral.py · db.py · locations.py · regions.py
+    └── __init__.py
 ```
 
 ## What's in each top-level directory
@@ -191,7 +184,8 @@ and the smoke-test checklist.
 
 ## Contact
 
-Built by **Siddharth** — siddharth.deshpande63@gmail.com
+Built by **Siddharth** — [siddharth.deshpande63@gmail.com](mailto:siddharth.deshpande63@gmail.com)
+
 Happy to walk through any of this; ping me directly for follow-up.
 
 ## License & credits
